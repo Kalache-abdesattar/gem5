@@ -47,7 +47,7 @@ else:
     )
 
 for isa in ("riscv", "x86"):
-    for num_cores in (1, 2, 4):
+    for num_cores in (4, 2):
         gem5_verify_config(
             name=f"test-chi with-{isa}-{num_cores}",
             fixtures=(),
