@@ -39,6 +39,9 @@ from gem5.components.cachehierarchies.chi.private_l1_cache_hierarchy import (
 from gem5.components.cachehierarchies.chi.private_l1_shared_l2_cache_hierarchy import (
     PrivateL1SharedL2CacheHierarchy,
 )
+from gem5.components.cachehierarchies.chi.l3_cache_hierarchy import (
+    L3CacheHierarchy,
+)
 from gem5.components.memory import SingleChannelDDR3_1600
 from gem5.components.processors.cpu_types import CPUTypes
 from gem5.components.processors.simple_processor import SimpleProcessor
@@ -117,10 +120,11 @@ isa = get_isa_from_str(args.isa)
 requires(isa_required=isa, coherence_protocol_required=CoherenceProtocol.CHI)
 
 # cache_hierarchy = PrivateL1CacheHierarchy(size="512KiB", assoc=8)
-cache_hierarchy=PrivateL1SharedL2CacheHierarchy(
-    l1_size="32KiB", l1_assoc=8, l2_size="2MiB", l2_assoc=16, 
-)
-
+# cache_hierarchy=PrivateL1SharedL2CacheHierarchy(
+#     l1_size="32KiB", l1_assoc=8, l2_size="2MiB", l2_assoc=16, 
+# )
+cache_hierarchy=L3CacheHierarchy(
+    l1_size="32KiB", l1_assoc=8, l2_size="2MiB", l2_assoc=16, l3_size="16MiB", l3_assoc=32)
 
 memory = SingleChannelDDR3_1600(size="32MiB")
 
