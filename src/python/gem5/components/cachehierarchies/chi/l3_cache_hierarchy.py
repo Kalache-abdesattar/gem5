@@ -27,6 +27,7 @@
 from itertools import chain
 from typing import List
 
+import m5
 from m5.objects import (
     NULL,
     RubyPortProxy,
@@ -34,6 +35,8 @@ from m5.objects import (
     RubySystem,
     RubyNetwork,
     RubyCache,
+    RRIPRP,
+    AddrRange,
 )
 from m5.objects.SubSystem import SubSystem
 
@@ -52,8 +55,8 @@ from gem5.components.cachehierarchies.ruby.abstract_ruby_cache_hierarchy import 
 from gem5.components.cachehierarchies.chi.nodes.abstract_node import (
     AbstractNode,
 )
-from gem5.components.cachehierarchies.chi.nodes.private_l1_shared_l2_cache_hierarchy import (
-    PrivateL1SharedL2CacheHierarchy,
+from gem5.components.cachehierarchies.chi.chi_noc import (
+    ChiNoC,
 )
 from gem5.components.cachehierarchies.ruby.topologies.simple_pt2pt import (
     SimplePt2Pt,
@@ -66,6 +69,66 @@ from .nodes.directory import SimpleDirectory
 from .nodes.dma_requestor import DMARequestor
 from .nodes.memory_controller import MemoryController
 from .nodes.private_l1_moesi_cache import PrivateL1MOESICache
+
+
+
+
+class SharedL2(AbstractNode):
+    """A home node (HNF) with a shared cache"""
+
+    def __init__(
+        self,
+        size: str,
+        assoc: int,
+        network: RubyNetwork,
+        cache_line_size: int,
+    ):
+        super().__init__(network, cache_line_size)
+
+        self.cache = RubyCache(
+            size=size,
+            assoc=assoc,
+            # Can choose any replacement policy
+            replacement_policy=RRIPRP(),
+        )
+
+
+        # Only used for L1 controllers
+        self.send_evictions = False
+        self.sequencer = NULL
+
+        # No prefetcher (home nodes don't support prefetchers right now)
+        self.use_prefetcher = False
+        self.prefetcher = NULL
+
+        # Set up home node that allows three hop protocols
+        self.is_HN = False 
+        self.enable_DMT = True
+        self.enable_DCT = True
+        self.allow_SD = True
+
+
+        # Some reasonable default TBE params
+        self.number_of_TBEs = 32
+        self.number_of_repl_TBEs = 32
+        self.number_of_snoop_TBEs = 1
+        self.number_of_DVM_TBEs = 1  # should not receive any dvm
+        self.number_of_DVM_snoop_TBEs = 1  # should not receive any dvm
+        self.unify_repl_TBEs = False
+
+        # MOESI / Mostly inclusive for shared / Exclusive for unique
+        self.alloc_on_seq_acc = False
+        self.alloc_on_seq_line_write = False
+        self.alloc_on_readshared = True
+        self.alloc_on_readunique = False
+        self.alloc_on_readonce = True
+        self.alloc_on_writeback = True
+        self.alloc_on_atomic = True
+        self.dealloc_on_unique = True
+        self.dealloc_on_shared = False
+        self.dealloc_backinv_unique = False
+        self.dealloc_backinv_shared = False
+
 
 
 
@@ -132,7 +195,7 @@ class L3CacheHierarchy(AbstractRubyCacheHierarchy):
     """A two level cache based on CHI
     """
 
-    def __init__(self, l1_size: str, l1_assoc: int, l2_size: str, l2_assoc: int):
+    def __init__(self, l1_size: str, l1_assoc: int, l2_size: str, l2_assoc: int, l3_size: str, l3_assoc: int):
         """
         :param l1_size: The size of the priavte I/D caches in the hierarchy.
         :param l1_assoc: The associativity of each cache.
@@ -145,8 +208,8 @@ class L3CacheHierarchy(AbstractRubyCacheHierarchy):
         self._l1_assoc = l1_assoc
         self._l2_size = l2_size
         self._l2_assoc = l2_assoc
-        self._l2_size = l3_size
-        self._l2_assoc = l3_assoc
+        self._l3_size = l3_size
+        self._l3_assoc = l3_assoc
 
     def incorporate_cache(self, board):
 
@@ -156,7 +219,7 @@ class L3CacheHierarchy(AbstractRubyCacheHierarchy):
         self.ruby_system = RubySystem()
 
         # Ruby's global network.
-        self.ruby_system.network = SimplePt2Pt(self.ruby_system)
+        self.ruby_system.network = ChiNoC(self.ruby_system)
 
         # Network configurations
         # virtual networks: 0=request, 1=snoop, 2=response, 3=data
@@ -172,11 +235,40 @@ class L3CacheHierarchy(AbstractRubyCacheHierarchy):
         )
         self.l3cache.ruby_system = self.ruby_system
 
+        # Create an L2 node
+        l2cache_0 = SharedL2(
+            size=self._l2_size,
+            assoc=self._l2_assoc,
+            network=self.ruby_system.network,
+            cache_line_size=board.get_cache_line_size()
+        )
+        l2cache_0.ruby_system = self.ruby_system
+
+        # Create an L2 node
+        l2cache_1 = SharedL2(
+            size=self._l2_size,
+            assoc=self._l2_assoc,
+            network=self.ruby_system.network,
+            cache_line_size=board.get_cache_line_size()
+        )
+        l2cache_1.ruby_system = self.ruby_system
+
+        # Create one core cluster with a split I/D cache for each core
+        self.core_clusters = [
+            self._create_core_cluster(core, i, board, l2cache_0, l2cache_1)
+            for i, core in enumerate(board.get_processor().get_cores())
+        ]
+
+
 
         # Create the coherent side of the memory controllers
         self.memory_controllers = self._create_memory_controllers(board)
 
+
         # In CHI, you must explicitly set downstream controllers
+        l2cache_0.downstream_destinations = self.l3cache
+        l2cache_1.downstream_destinations = self.l3cache
+
         self.l3cache.downstream_destinations = self.memory_controllers
 
         # Create the DMA Controllers, if required as in FS mode
@@ -189,13 +281,13 @@ class L3CacheHierarchy(AbstractRubyCacheHierarchy):
             self.ruby_system.num_of_sequencers = len(self.core_clusters) * 2
 
 
-        # L2 cache hierarchy with private L1 caches 
-        l2_cache_hierarchy = PrivateL1SharedL2CacheHierarchy(
-            l1_size=self.l1_size, 
-            l2_size=self.l2_size,
-            l1_assoc=self.l1_assoc,
-            l2_assoc=self.l2_assoc
-        )
+        # # L2 cache hierarchy with private L1 caches 
+        # l2_cache_hierarchy = PrivateL1SharedL2CacheHierarchy(
+        #     l1_size=self.l1_size, 
+        #     l2_size=self.l2_size,
+        #     l1_assoc=self.l1_assoc,
+        #     l2_assoc=self.l2_assoc
+        # )
 
 
         # Connect the controllers within the network. Note that this function
@@ -211,9 +303,10 @@ class L3CacheHierarchy(AbstractRubyCacheHierarchy):
                     ]
                 )
             )
+            + [l2cache_0] 
+            + [l2cache_1]
+            + [self.l3cache]
             + self.memory_controllers
-            + [self.l2cache]
-            + (self.dma_controllers if board.has_dma_ports() else [])
         )
 
         self.ruby_system.network.setup_buffers()
@@ -221,11 +314,12 @@ class L3CacheHierarchy(AbstractRubyCacheHierarchy):
         # Set up a proxy port for the system_port. Used for load binaries and
         # other functional-only things.
         self.ruby_system.sys_port_proxy = RubyPortProxy()
+        self.ruby_system.sys_port_proxy.ruby_system = self.ruby_system
         board.connect_system_port(self.ruby_system.sys_port_proxy.in_ports)
 
 
     def _create_core_cluster(
-        self, core, core_num: int, board
+        self, core, core_num: int, board, l2_cache_0, l2_cache_1 
     ) -> SubSystem:
         """Given the core and the core number this function creates a cluster
         for the core with a split I/D cache.
@@ -255,12 +349,13 @@ class L3CacheHierarchy(AbstractRubyCacheHierarchy):
 
         # The sequencers are used to connect the core to the cache
         cluster.icache.sequencer = RubySequencer(
-            version=core_num, dcache=NULL, clk_domain=cluster.icache.clk_domain
+            version=core_num, dcache=NULL, clk_domain=cluster.icache.clk_domain, ruby_system=self.ruby_system
         )
         cluster.dcache.sequencer = RubySequencer(
             version=core_num,
             dcache=cluster.dcache.cache,
             clk_domain=cluster.dcache.clk_domain,
+            ruby_system=self.ruby_system
         )
 
         # If full system, connect the IO bus to the sequencer
@@ -289,9 +384,12 @@ class L3CacheHierarchy(AbstractRubyCacheHierarchy):
             core.connect_interrupt()
 
         # Set the downstream destinations for the caches
-        cluster.dcache.downstream_destinations = [self.l2cache]
-        cluster.icache.downstream_destinations = [self.l2cache]
-
+        if(core_num < 2): 
+            cluster.dcache.downstream_destinations = [l2_cache_0]
+            cluster.icache.downstream_destinations = [l2_cache_0]
+        else: 
+            cluster.dcache.downstream_destinations = [l2_cache_1]
+            cluster.icache.downstream_destinations = [l2_cache_1]
         return cluster
 
 
@@ -325,7 +423,7 @@ class L3CacheHierarchy(AbstractRubyCacheHierarchy):
             ctrl.ruby_system = self.ruby_system
             ctrl.sequencer.ruby_system = self.ruby_system
 
-            ctrl.downstream_destinations = [self.l2cache]
+            ctrl.downstream_destinations = [self.l3cache]
 
             dma_controllers.append(ctrl)
 
