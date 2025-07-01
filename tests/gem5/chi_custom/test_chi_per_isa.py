@@ -46,7 +46,7 @@ else:
         config.base_dir, "tests", "gem5", "resources"
     )
 
-for isa in ("riscv", "x86"):
+for isa in ("riscv", "x86"): 
     for num_cores in (4, 2):
         gem5_verify_config(
             name=f"test-chi with-{isa}-{num_cores}",
