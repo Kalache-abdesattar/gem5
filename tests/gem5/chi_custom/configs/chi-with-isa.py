@@ -114,6 +114,23 @@ parser.add_argument(
     help="The directory in which resources will be downloaded or exist.",
 )
 
+parser.add_argument(
+    "--debug-flags",
+    type=str,
+    required=False,
+    default=None,
+    help="The directory in which resources will be downloaded or exist.",
+)
+
+parser.add_argument(
+    "--debug-file",
+    type=str,
+    required=False,
+    default=None,
+    help="The directory in which resources will be downloaded or exist.",
+)
+
+
 args = parser.parse_args()
 isa = get_isa_from_str(args.isa)
 

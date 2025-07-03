@@ -69,6 +69,8 @@ for isa in ("riscv", "x86"):
                 isa,
                 f"--num-cores={num_cores}",
                 f"--resource-directory={resource_directory}",
+                f"--debug-flags=Cache,MemoryAccess",
+                f"--debug-file=cache_trace.txt",
             ],
             valid_isas=(constants.all_compiled_tag,),
             valid_hosts=constants.supported_hosts,
