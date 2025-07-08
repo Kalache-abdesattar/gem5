@@ -10,6 +10,13 @@ system software changes, and compile-time and run-time system optimizations.
 
 The main website can be found at <http://www.gem5.org>.
 
+
+## Run a Quick Test on the Cluster 
+<pre><code>
+cd tests && source quick_run.sh
+</code></pre>
+
+
 ## Testing status
 
 **Note**: These regard tests run on the develop branch of gem5:
