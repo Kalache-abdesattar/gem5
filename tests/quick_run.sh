@@ -1,0 +1,1 @@
+./../build/ALL/gem5.opt --debug-flags=ExecAll,MemoryAccess,RubyPort,Cache,RubyCache,RubyNetwork --debug-file=cache_trace.txt --debug-start=50000 --debug-end=1000000000 gem5/chi_custom/configs/chi-with-isa.py riscv --num-cores=4 --resource-directory=gem5/resources
