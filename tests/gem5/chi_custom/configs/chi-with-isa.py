@@ -33,6 +33,11 @@ import argparse
 
 from gem5.coherence_protocol import CoherenceProtocol
 from gem5.components.boards.simple_board import SimpleBoard
+
+from gem5.components.boards.test_board import TestBoard
+from gem5.components.processors.linear_generator import LinearGenerator
+from gem5.components.processors.random_generator import RandomGenerator
+
 from gem5.components.cachehierarchies.chi.private_l1_cache_hierarchy import (
     PrivateL1CacheHierarchy,
 )
@@ -140,10 +145,15 @@ requires(isa_required=isa, coherence_protocol_required=CoherenceProtocol.CHI)
 # cache_hierarchy=PrivateL1SharedL2CacheHierarchy(
 #     l1_size="32KiB", l1_assoc=8, l2_size="2MiB", l2_assoc=16, 
 # )
-cache_hierarchy=L3CacheHierarchy(
-    l1_size="32KiB", l1_assoc=8, l2_size="2MiB", l2_assoc=16, l3_size="16MiB", l3_assoc=32)
+# cache_hierarchy=L3CacheHierarchy(
+#     l1_size="32KiB", l1_assoc=16, l2_size="1MiB", l2_assoc=16, l3_size="16MiB", l3_assoc=32)
 
-memory = SingleChannelDDR3_1600(size="32MiB")
+
+cache_hierarchy=L3CacheHierarchy(
+    l1_size="16KiB", l1_assoc=8, l2_size="1MiB", l2_assoc=16, l3_size="16MiB", l3_assoc=32)
+
+
+memory = SingleChannelDDR3_1600(size="8192MiB")
 
 processor = SimpleProcessor(
     cpu_type=CPUTypes.TIMING,
@@ -151,19 +161,30 @@ processor = SimpleProcessor(
     num_cores=args.num_cores,
 )
 
-board = SimpleBoard(
+# board = SimpleBoard(
+#     clk_freq="3GHz",
+#     processor=processor,
+#     memory=memory,
+#     cache_hierarchy=cache_hierarchy,
+# )
+
+# board.set_se_binary_workload(
+#     binary=obtain_resource(
+#         resource_id=isa_resource_map[isa],
+#         resource_version=resource_version_map[isa_resource_map[isa]],
+#         resource_directory=args.resource_directory,
+#     )
+# )
+
+
+generator = RandomGenerator(num_cores=args.num_cores, rate="1GB/s", duration="100ms")
+
+
+board = TestBoard(
     clk_freq="3GHz",
-    processor=processor,
+    generator=generator,
     memory=memory,
     cache_hierarchy=cache_hierarchy,
-)
-
-board.set_se_binary_workload(
-    binary=obtain_resource(
-        resource_id=isa_resource_map[isa],
-        resource_version=resource_version_map[isa_resource_map[isa]],
-        resource_directory=args.resource_directory,
-    )
 )
 
 simulator = Simulator(board=board)
