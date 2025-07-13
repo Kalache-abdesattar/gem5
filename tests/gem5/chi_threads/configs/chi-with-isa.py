@@ -61,12 +61,13 @@ from gem5.utils.requires import requires
 from gem5.resources.resource import BinaryResource
 from pathlib import Path
 
-supported_isa_targets = set({ISA.X86})
+supported_isa_targets = set({ISA.X86, ISA.RISCV})
 
 # Maps the isa under test to the id of the resources that should be used to
 # create the workload.
 isa_resource_map = {
-    ISA.X86: "threads"
+    ISA.X86: "threads",
+    ISA.RISCV: "threads"
 }
 
 # States which version of each resource to use.
@@ -169,7 +170,7 @@ board = SimpleBoard(
     cache_hierarchy=cache_hierarchy,
 )
 
-binary_path = Path(args.resource_directory) / "threads"
+binary_path = Path(args.resource_directory) / "threads.elf"
 
 board.set_se_binary_workload(
     binary=BinaryResource(str(binary_path))
