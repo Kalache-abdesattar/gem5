@@ -171,11 +171,18 @@ board = SimpleBoard(
 )
 
 binary_path = Path(args.resource_directory) / "threads.elf"
+binary = BinaryResource(str(binary_path))
 
-board.set_se_binary_workload(
-    binary=BinaryResource(str(binary_path))
+binaries = list([binary] * args.num_cores)
+
+board.set_se_multi_binary_workload(
+    binaries=binaries,
+    
 )
 
+# board.set_se_binary_workload(
+#     binary=binary,
+# )
 
 
 simulator = Simulator(board=board)
