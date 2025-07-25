@@ -103,9 +103,9 @@ class SharedL2(AbstractNode):
 
         # Set up home node that allows three hop protocols
         self.is_HN = False 
-        self.enable_DMT = True
-        self.enable_DCT = True
-        self.allow_SD = True
+        self.enable_DMT = False
+        self.enable_DCT = False
+        self.allow_SD = False
 
 
         # Some reasonable default TBE params
@@ -162,9 +162,9 @@ class SharedL3(AbstractNode):
 
         # Set up home node that allows three hop protocols
         self.is_HN = True
-        self.enable_DMT = True
-        self.enable_DCT = True
-        self.allow_SD = True
+        self.enable_DMT = False
+        self.enable_DCT = False
+        self.allow_SD = False
 
 
         # Some reasonable default TBE params
