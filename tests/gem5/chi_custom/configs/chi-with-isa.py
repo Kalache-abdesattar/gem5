@@ -177,7 +177,7 @@ processor = SimpleProcessor(
 # )
 
 
-generator = RandomGenerator(num_cores=args.num_cores, rate="1GB/s", duration="100ms")
+generator = RandomGenerator(num_cores=args.num_cores, rate="1GB/s", data_limit=512)
 
 
 board = TestBoard(
