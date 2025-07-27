@@ -171,6 +171,12 @@ in_port(snpInPort, CHIRequestMsg, snpIn, rank=7) {
     assert(is_HN == false);
     printResources();
     peek(snpInPort, CHIRequestMsg) {
+
+      DPRINTF(ChiSlicc,
+                "[snpInPort][Receiver Node ID (version): %d] in_msg: type=%s addr=%#x source=%d requestor=%d\n",
+                version, in_msg.type, in_msg.addr,
+                in_msg.seqReq, in_msg.requestor);
+
       assert(in_msg.allowRetry == false);
       if (in_msg.usesTxnId) {
         TBE preexistingTBE := getDvmTBE(in_msg.txnId);
@@ -375,6 +381,13 @@ in_port(reqInPort, CHIRequestMsg, reqIn, rank=2,
   if (reqInPort.isReady(clockEdge())) {
     printResources();
     peek(reqInPort, CHIRequestMsg) {
+      // Print useful metadata of the request message
+      DPRINTF(ChiSlicc, 
+              "[reqInPort][Receiver Node ID (version): %d] in_msg: type=%s addr=%#x source=%d requestor=%d\n",
+              version, in_msg.type, in_msg.addr, 
+              in_msg.seqReq, in_msg.requestor);
+
+
       // DVM Sync and TLBIs from external sources will use txnId requests,
       // but they aren't implemented yet.
       assert(!in_msg.usesTxnId);
