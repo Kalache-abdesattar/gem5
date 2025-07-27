@@ -142,15 +142,15 @@ isa = get_isa_from_str(args.isa)
 requires(isa_required=isa, coherence_protocol_required=CoherenceProtocol.CHI)
 
 # cache_hierarchy = PrivateL1CacheHierarchy(size="512KiB", assoc=8)
-# cache_hierarchy=PrivateL1SharedL2CacheHierarchy(
-#     l1_size="32KiB", l1_assoc=8, l2_size="2MiB", l2_assoc=16, 
-# )
+cache_hierarchy=PrivateL1SharedL2CacheHierarchy(
+    l1_size="32KiB", l1_assoc=8, l2_size="2MiB", l2_assoc=16, 
+)
 # cache_hierarchy=L3CacheHierarchy(
 #     l1_size="32KiB", l1_assoc=16, l2_size="1MiB", l2_assoc=16, l3_size="16MiB", l3_assoc=32)
 
 
-cache_hierarchy=L3CacheHierarchy(
-    l1_size="16KiB", l1_assoc=8, l2_size="1MiB", l2_assoc=16, l3_size="16MiB", l3_assoc=32)
+# cache_hierarchy=L3CacheHierarchy(
+#     l1_size="16KiB", l1_assoc=8, l2_size="1MiB", l2_assoc=16, l3_size="16MiB", l3_assoc=32)
 
 
 memory = SingleChannelDDR3_1600(size="8192MiB")
@@ -177,7 +177,7 @@ processor = SimpleProcessor(
 # )
 
 
-generator = RandomGenerator(num_cores=args.num_cores, rate="1GB/s", data_limit=512)
+generator = RandomGenerator(num_cores=args.num_cores, rate="1GB/s", data_limit=1024, rd_perc=50, max_addr=32)
 
 
 board = TestBoard(
