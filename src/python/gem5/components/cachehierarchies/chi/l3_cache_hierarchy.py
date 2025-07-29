@@ -117,18 +117,17 @@ class SharedL2(AbstractNode):
         self.unify_repl_TBEs = False
 
         # MOESI / Mostly inclusive for shared / Exclusive for unique
-        self.alloc_on_seq_acc = False
-        self.alloc_on_seq_line_write = False
+        self.alloc_on_seq_acc = True
+        self.alloc_on_seq_line_write = True
         self.alloc_on_readshared = True
-        self.alloc_on_readunique = False
+        self.alloc_on_readunique = True
         self.alloc_on_readonce = True
         self.alloc_on_writeback = True
         self.alloc_on_atomic = True
-        self.dealloc_on_unique = True
+        self.dealloc_on_unique = False
         self.dealloc_on_shared = False
         self.dealloc_backinv_unique = False
         self.dealloc_backinv_shared = False
-
 
 
 
@@ -176,14 +175,14 @@ class SharedL3(AbstractNode):
         self.unify_repl_TBEs = False
 
         # MOESI / Mostly inclusive for shared / Exclusive for unique
-        self.alloc_on_seq_acc = False
-        self.alloc_on_seq_line_write = False
+        self.alloc_on_seq_acc = True
+        self.alloc_on_seq_line_write = True
         self.alloc_on_readshared = True
-        self.alloc_on_readunique = False
+        self.alloc_on_readunique = True
         self.alloc_on_readonce = True
         self.alloc_on_writeback = True
         self.alloc_on_atomic = True
-        self.dealloc_on_unique = True
+        self.dealloc_on_unique = False
         self.dealloc_on_shared = False
         self.dealloc_backinv_unique = False
         self.dealloc_backinv_shared = False
