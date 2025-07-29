@@ -37,6 +37,8 @@ from gem5.components.boards.simple_board import SimpleBoard
 from gem5.components.boards.test_board import TestBoard
 from gem5.components.processors.linear_generator import LinearGenerator
 from gem5.components.processors.random_generator import RandomGenerator
+from gem5.components.processors.custom_generator import CustomGenerator
+
 
 from gem5.components.cachehierarchies.chi.private_l1_cache_hierarchy import (
     PrivateL1CacheHierarchy,
@@ -142,24 +144,24 @@ isa = get_isa_from_str(args.isa)
 requires(isa_required=isa, coherence_protocol_required=CoherenceProtocol.CHI)
 
 # cache_hierarchy = PrivateL1CacheHierarchy(size="512KiB", assoc=8)
-cache_hierarchy=PrivateL1SharedL2CacheHierarchy(
-    l1_size="32KiB", l1_assoc=8, l2_size="2MiB", l2_assoc=16, 
-)
+# cache_hierarchy=PrivateL1SharedL2CacheHierarchy(
+#     l1_size="32KiB", l1_assoc=8, l2_size="2MiB", l2_assoc=16, 
+# )
 # cache_hierarchy=L3CacheHierarchy(
 #     l1_size="32KiB", l1_assoc=16, l2_size="1MiB", l2_assoc=16, l3_size="16MiB", l3_assoc=32)
 
 
-# cache_hierarchy=L3CacheHierarchy(
-#     l1_size="16KiB", l1_assoc=8, l2_size="1MiB", l2_assoc=16, l3_size="16MiB", l3_assoc=32)
+cache_hierarchy=L3CacheHierarchy(
+    l1_size="16KiB", l1_assoc=8, l2_size="1MiB", l2_assoc=16, l3_size="16MiB", l3_assoc=32)
 
 
 memory = SingleChannelDDR3_1600(size="8192MiB")
 
-processor = SimpleProcessor(
-    cpu_type=CPUTypes.TIMING,
-    isa=isa,
-    num_cores=args.num_cores,
-)
+# processor = SimpleProcessor(
+#     cpu_type=CPUTypes.TIMING,
+#     isa=isa,
+#     num_cores=args.num_cores,
+# )
 
 # board = SimpleBoard(
 #     clk_freq="3GHz",
@@ -177,7 +179,7 @@ processor = SimpleProcessor(
 # )
 
 
-generator = RandomGenerator(num_cores=args.num_cores, rate="1GB/s", data_limit=1024, rd_perc=50, max_addr=32)
+generator = CustomGenerator(num_cores=args.num_cores, rate="10MB/s", data_limit=1024, rd_perc=20, max_addr=32, block_size=16)
 
 
 board = TestBoard(
