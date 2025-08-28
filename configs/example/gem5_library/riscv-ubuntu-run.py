@@ -44,7 +44,7 @@ import m5
 from m5.objects import Root
 
 from gem5.components.boards.riscv_board import RiscvBoard
-from gem5.components.memory import DualChannelDDR4_2400
+from gem5.components.memory import (DualChannelDDR4_2400, SingleChannelDDR3_1600,)
 from gem5.components.processors.cpu_types import CPUTypes
 from gem5.components.processors.simple_processor import SimpleProcessor
 from gem5.isas import ISA
@@ -62,18 +62,40 @@ from gem5.components.cachehierarchies.classic.private_l1_private_l2_walk_cache_h
     PrivateL1PrivateL2WalkCacheHierarchy,
 )
 
-# Here we setup the parameters of the l1 and l2 caches.
-cache_hierarchy = PrivateL1PrivateL2WalkCacheHierarchy(
-    l1d_size="16KiB", l1i_size="16KiB", l2_size="256KiB"
+from gem5.components.cachehierarchies.chi.l3_cache_hierarchy import (
+    L3CacheHierarchy,
 )
+
+from gem5.components.processors.simple_switchable_processor import (
+    SimpleSwitchableProcessor,
+)
+# Here we setup the parameters of the l1 and l2 caches.
+# cache_hierarchy = PrivateL1PrivateL2WalkCacheHierarchy(
+#     l1d_size="16KiB", l1i_size="16KiB", l2_size="256KiB"
+# )
+
+cache_hierarchy = L3CacheHierarchy(
+    l1_size="16KiB", l1_assoc=8, l2_size="1MiB", l2_assoc=16, l3_size="16MiB", l3_assoc=32)
+
 
 # Memory: Dual Channel DDR4 2400 DRAM device.
 
 memory = DualChannelDDR4_2400(size="3GiB")
 
+# Setup the system memory.
+memory = SingleChannelDDR3_1600()
+
+
 # Here we setup the processor. We use a simple processor.
-processor = SimpleProcessor(
-    cpu_type=CPUTypes.TIMING, isa=ISA.RISCV, num_cores=2
+# processor = SimpleProcessor(
+#     cpu_type=CPUTypes.TIMING, isa=ISA.RISCV, num_cores=4
+# )
+
+processor = SimpleSwitchableProcessor(
+    starting_core_type=CPUTypes.ATOMIC,
+    switch_core_type=CPUTypes.TIMING,
+    isa=ISA.RISCV,
+    num_cores=4,
 )
 
 # Here we setup the board. The RiscvBoard allows for Full-System RISCV
@@ -104,6 +126,8 @@ def exit_event_handler():
     print("Third exit: Finished `after_boot.sh` script")
     # The after_boot.sh script will run a script if it is passed via
     # m5 readfile. This is the last exit event before the simulation exits.
+    processor.switch()
+    
     yield True
 
 
