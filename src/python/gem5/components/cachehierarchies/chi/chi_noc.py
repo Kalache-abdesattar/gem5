@@ -104,7 +104,7 @@ from m5.objects import (
 class ChiNoC(SimpleNetwork):
     """A custom hierarchical network. This doesn't not use garnet -yet-."""
 
-    def __init__(self, ruby_system):
+    def __init__(self, ruby_system, num_cores, cores_per_cluster, has_dma_ports):
         super().__init__()
         self.netifs = []
 
@@ -112,10 +112,13 @@ class ChiNoC(SimpleNetwork):
         # https://gem5.atlassian.net/browse/GEM5-1039
         self.ruby_system = ruby_system
 
+        self._num_cores = num_cores
+        self._cores_per_cluster = cores_per_cluster
+        self._has_dma_ports = has_dma_ports
+
     def connectControllers(self, controllers):
         """
         """
-        # all_controllers = l1_controllers + l2_controllers + l3_controllers + [mem_ctrl]
 
         # Create one router/switch per controller in the system
         self.routers = [Switch(router_id=i) for i in range(len(controllers))]
@@ -131,60 +134,69 @@ class ChiNoC(SimpleNetwork):
         link_count = 0
         int_links = []
 
+        
+        for core_idx in range(self._num_cores):
+            l2_idx = 2 * self._num_cores + core_idx // self._cores_per_cluster
+
+            link_count += 1
+            int_links.append(SimpleIntLink(link_id=link_count, src_node=self.routers[2*core_idx], dst_node=self.routers[l2_idx]))
+
+            link_count += 1
+            int_links.append(SimpleIntLink(link_id=link_count, src_node=self.routers[2*core_idx+1], dst_node=self.routers[l2_idx]))
+
+            link_count += 1
+            int_links.append(SimpleIntLink(link_id=link_count, src_node=self.routers[l2_idx], dst_node=self.routers[2*core_idx]))
+
+            link_count += 1
+            int_links.append(SimpleIntLink(link_id=link_count, src_node=self.routers[l2_idx], dst_node=self.routers[2*core_idx+1]))
+        
+
+
         # Internal links between L3 (10) and L2s (9, 8)
-        link_count += 1
-        int_links.append(SimpleIntLink(link_id=link_count, src_node=self.routers[9], dst_node=self.routers[10]))
-        link_count += 1
-        int_links.append(SimpleIntLink(link_id=link_count, src_node=self.routers[8], dst_node=self.routers[10]))
-        link_count += 1
-        int_links.append(SimpleIntLink(link_id=link_count, src_node=self.routers[10], dst_node=self.routers[9]))
-        link_count += 1
-        int_links.append(SimpleIntLink(link_id=link_count, src_node=self.routers[10], dst_node=self.routers[8]))
+        num_l2s = self._num_cores // self._cores_per_cluster
+        l3_idx = 2 * self._num_cores + num_l2s
 
-        # cluster_0 (I:0, D:1) → L2_0 (8)
-        link_count += 1
-        int_links.append(SimpleIntLink(link_id=link_count, src_node=self.routers[0], dst_node=self.routers[8]))
-        link_count += 1
-        int_links.append(SimpleIntLink(link_id=link_count, src_node=self.routers[1], dst_node=self.routers[8]))
-        link_count += 1
-        int_links.append(SimpleIntLink(link_id=link_count, src_node=self.routers[8], dst_node=self.routers[0]))
-        link_count += 1
-        int_links.append(SimpleIntLink(link_id=link_count, src_node=self.routers[8], dst_node=self.routers[1]))
+        for i in range(num_l2s):
+            l2_idx = 2 * self._num_cores + i 
 
-        # cluster_1 (I:2, D:3) → L2_0 (8)
-        link_count += 1
-        int_links.append(SimpleIntLink(link_id=link_count, src_node=self.routers[2], dst_node=self.routers[8]))
-        link_count += 1
-        int_links.append(SimpleIntLink(link_id=link_count, src_node=self.routers[3], dst_node=self.routers[8]))
-        link_count += 1
-        int_links.append(SimpleIntLink(link_id=link_count, src_node=self.routers[8], dst_node=self.routers[2]))
-        link_count += 1
-        int_links.append(SimpleIntLink(link_id=link_count, src_node=self.routers[8], dst_node=self.routers[3]))
+            link_count += 1
+            int_links.append(SimpleIntLink(link_id=link_count, src_node=self.routers[l2_idx], dst_node=self.routers[l3_idx]))
+            
+            link_count += 1
+            int_links.append(SimpleIntLink(link_id=link_count, src_node=self.routers[l3_idx], dst_node=self.routers[l2_idx]))
 
-        # cluster_2 (I:4, D:5) → L2_1 (9)
-        link_count += 1
-        int_links.append(SimpleIntLink(link_id=link_count, src_node=self.routers[4], dst_node=self.routers[9]))
-        link_count += 1
-        int_links.append(SimpleIntLink(link_id=link_count, src_node=self.routers[5], dst_node=self.routers[9]))
-        link_count += 1
-        int_links.append(SimpleIntLink(link_id=link_count, src_node=self.routers[9], dst_node=self.routers[4]))
-        link_count += 1
-        int_links.append(SimpleIntLink(link_id=link_count, src_node=self.routers[9], dst_node=self.routers[5]))
 
-        # cluster_3 (I:6, D:7) → L2_1 (9)
+        mem_ctrl_idx = l3_idx + 1
+        # L3  ↔ MemCtrl 
         link_count += 1
-        int_links.append(SimpleIntLink(link_id=link_count, src_node=self.routers[6], dst_node=self.routers[9]))
+        int_links.append(SimpleIntLink(link_id=link_count, src_node=self.routers[l3_idx], dst_node=self.routers[mem_ctrl_idx]))
         link_count += 1
-        int_links.append(SimpleIntLink(link_id=link_count, src_node=self.routers[7], dst_node=self.routers[9]))
-        link_count += 1
-        int_links.append(SimpleIntLink(link_id=link_count, src_node=self.routers[9], dst_node=self.routers[6]))
-        link_count += 1
-        int_links.append(SimpleIntLink(link_id=link_count, src_node=self.routers[9], dst_node=self.routers[7]))
+        int_links.append(SimpleIntLink(link_id=link_count, src_node=self.routers[mem_ctrl_idx], dst_node=self.routers[l3_idx]))
 
-        # L3 (10) ↔ MemCtrl (11)
-        link_count += 1
-        int_links.append(SimpleIntLink(link_id=link_count, src_node=self.routers[10], dst_node=self.routers[11]))
-        link_count += 1
-        int_links.append(SimpleIntLink(link_id=link_count, src_node=self.routers[11], dst_node=self.routers[10]))
+    
+        if self._has_dma_ports: 
+            dma0_idx = mem_ctrl_idx + 1
+            # DMA0 ↔ L3 
+            link_count += 1
+            int_links.append(SimpleIntLink(link_id=link_count,
+                                        src_node=self.routers[dma0_idx],
+                                        dst_node=self.routers[l3_idx]))
+            link_count += 1
+            int_links.append(SimpleIntLink(link_id=link_count,
+                                        src_node=self.routers[l3_idx],
+                                        dst_node=self.routers[dma0_idx]))
+
+            # DMA1 ↔ L3
+            dma1_idx = mem_ctrl_idx + 2
+
+            link_count += 1
+            int_links.append(SimpleIntLink(link_id=link_count,
+                                        src_node=self.routers[dma1_idx],
+                                        dst_node=self.routers[l3_idx]))
+            link_count += 1
+            int_links.append(SimpleIntLink(link_id=link_count,
+                                        src_node=self.routers[l3_idx],
+                                        dst_node=self.routers[dma1_idx]))
+
 
         self.int_links = int_links
