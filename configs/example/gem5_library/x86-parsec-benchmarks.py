@@ -44,7 +44,7 @@ scons build/X86/gem5.opt
     --size <simulation_size>
 ```
 
-## build/X86/gem5.opt configs/example/gem5_library/x86-parsec-benchmarks2.py --benchmark blackscholes --size simsmall
+## build/X86_CUSTOM/gem5.opt configs/example/gem5_library/x86-parsec-benchmarks.py --benchmark blackscholes --size simsmall
 """
 import argparse
 import time
@@ -70,6 +70,7 @@ from gem5.utils.requires import requires
 from gem5.components.cachehierarchies.chi.l3_cache_hierarchy import (
     L3CacheHierarchy,
 )
+
 
 
 # We check for the required gem5 build.
@@ -163,7 +164,7 @@ from gem5.components.cachehierarchies.classic.no_cache import (
 # cache_hierarchy = NoCache()
 
 cache_hierarchy = L3CacheHierarchy(
-    l1_size="16KiB", l1_assoc=8, l2_size="1MiB", l2_assoc=16, l3_size="16MiB", l3_assoc=32, cores_per_cluster=1)
+    l1_size="16KiB", l1_assoc=8, l2_size="512KiB", l2_assoc=8, l3_size="16MiB", l3_assoc=16, cores_per_cluster=1)
 
 
 # Memory: Dual Channel DDR4 2400 DRAM device.
@@ -181,9 +182,9 @@ memory = DualChannelDDR4_2400(size="3GiB")
 
 processor = SimpleSwitchableProcessor(
     starting_core_type=CPUTypes.KVM,
-    switch_core_type=CPUTypes.TIMING,
+    switch_core_type=CPUTypes.O3,
     isa=ISA.X86,
-    num_cores=4,
+    num_cores=8,
 )
 
 # Here we setup the board. The X86Board allows for Full-System X86 simulations
