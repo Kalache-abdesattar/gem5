@@ -2596,6 +2596,11 @@ action(UpdateDirState_FromReqResp, desc="") {
         tbe.dir_owner := in_msg.responder;
         tbe.dir_ownerExists := true;
         tbe.dir_ownerIsExcl := true;
+
+        // HACK: 
+        if(tbe.finalState == State:RU) {
+          tbe.dataValid := false;
+        }
       }
     }
   }
