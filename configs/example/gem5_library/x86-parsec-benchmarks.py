@@ -221,8 +221,12 @@ command = (
 
 
 board.set_kernel_disk_workload(
-    kernel=KernelResource(
-        local_path="/opt/parsec-tests/kernel/x86-linux-kernel-4.19.83"),
+    # kernel=KernelResource(
+    #     local_path="/opt/parsec-tests/kernel/x86-linux-kernel-4.19.83"),
+    
+    kernel=obtain_resource(
+        "x86-linux-kernel-4.19.83", resource_version="1.0.0"
+    ),
 
     disk_image=obtain_resource("x86-parsec", resource_version="1.0.0"),
 
