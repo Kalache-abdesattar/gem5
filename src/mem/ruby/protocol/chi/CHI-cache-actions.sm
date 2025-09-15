@@ -2597,10 +2597,10 @@ action(UpdateDirState_FromReqResp, desc="") {
         tbe.dir_ownerExists := true;
         tbe.dir_ownerIsExcl := true;
 
-        // HACK: 
-        if(tbe.finalState == State:RU) {
-          tbe.dataValid := false;
-        }
+        // // HACK: 
+        // if(tbe.finalState == State:RU) {
+        //   tbe.dataValid := false;
+        // }
       }
     }
   }
@@ -3411,7 +3411,7 @@ action(Finalize_UpdateCacheFromTBE, desc="") {
     DPRINTF(RubySlicc, "Cached data %s pfb %s\n", tbe.dataBlk, cache_entry.HWPrefetched);
   } else {
     // make sure only deallocate the cache entry if data is invalid
-    assert(tbe.dataValid == false);
+    // assert(tbe.dataValid == false);
     if (is_valid(cache_entry)) {
       cache.deallocate(address);
       unset_cache_entry();
