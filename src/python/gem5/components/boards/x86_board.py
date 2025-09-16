@@ -374,6 +374,6 @@ class X86Board(AbstractSystemBoard, KernelDiskWorkload, SEBinaryWorkload):
             "earlyprintk=ttyS0",
             "console=ttyS0",
             "lpj=7999923",
-            "root={root_value}",
+            "root={root_value}1",
             "disk_device={disk_device}",
         ]
