@@ -69,14 +69,19 @@ from gem5.components.cachehierarchies.chi.l3_cache_hierarchy import (
 from gem5.components.processors.simple_switchable_processor import (
     SimpleSwitchableProcessor,
 )
+
+from gem5.components.cachehierarchies.classic.no_cache import (
+    NoCache,
+)
 # Here we setup the parameters of the l1 and l2 caches.
 # cache_hierarchy = PrivateL1PrivateL2WalkCacheHierarchy(
 #     l1d_size="16KiB", l1i_size="16KiB", l2_size="256KiB"
 # )
 
 cache_hierarchy = L3CacheHierarchy(
-    l1_size="16KiB", l1_assoc=8, l2_size="1MiB", l2_assoc=16, l3_size="16MiB", l3_assoc=32)
+    l1_size="16KiB", l1_assoc=8, l2_size="1MiB", l2_assoc=16, l3_size="16MiB", l3_assoc=32, cores_per_cluster=2)
 
+# cache_hierarchy = NoCache()
 
 # Memory: Dual Channel DDR4 2400 DRAM device.
 
@@ -92,11 +97,23 @@ memory = SingleChannelDDR3_1600()
 # )
 
 processor = SimpleSwitchableProcessor(
-    starting_core_type=CPUTypes.ATOMIC,
+    starting_core_type=CPUTypes.TIMING,
     switch_core_type=CPUTypes.TIMING,
     isa=ISA.RISCV,
     num_cores=4,
 )
+
+
+default_args = [
+            "console=ttyS0",
+            "root=/dev/vda1",
+            "disk_device=/dev/vda1",
+            "rw",
+            "no_systemd=true",      # Disable systemd
+            "interactive=false"      # Enable interactive shell
+        ]
+
+
 
 # Here we setup the board. The RiscvBoard allows for Full-System RISCV
 # simulations.
@@ -105,7 +122,9 @@ board = RiscvBoard(
     processor=processor,
     memory=memory,
     cache_hierarchy=cache_hierarchy,
+    new_kernel_args=default_args
 )
+
 
 # Here we a full system workload: "riscv-ubuntu-20.04-boot" which boots
 # Ubuntu 20.04. Once the system successfully boots it encounters an `m5_exit`
@@ -119,6 +138,8 @@ board.set_workload(
 def exit_event_handler():
     print("First exit: kernel booted")
     yield False  # gem5 is now executing systemd startup
+
+
     print("Second exit: Started `after_boot.sh` script")
     # The after_boot.sh script is executed after the kernel and systemd have
     # booted.
@@ -126,7 +147,11 @@ def exit_event_handler():
     print("Third exit: Finished `after_boot.sh` script")
     # The after_boot.sh script will run a script if it is passed via
     # m5 readfile. This is the last exit event before the simulation exits.
-    processor.switch()
+    
+    print("Take a checkpoint")
+    simulator.save_checkpoint("riscv_ubuntu_checkpoint")
+
+    # processor.switch()
     
     yield True
 
@@ -138,5 +163,7 @@ simulator = Simulator(
         # exit event.
         ExitEvent.EXIT: exit_event_handler()
     },
+
+    checkpoint_path="/opt/gem5/riscv_ubuntu_checkpoint",
 )
 simulator.run()
