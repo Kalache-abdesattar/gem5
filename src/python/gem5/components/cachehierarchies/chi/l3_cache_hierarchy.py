@@ -296,11 +296,12 @@ class L3CacheHierarchy(AbstractRubyCacheHierarchy):
 
         # Create the DMA Controllers, if required as in FS mode
         if board.has_dma_ports():
-            self.dma_controllers = self._create_dma_controllers(board)
+            dma_controllers = self._create_dma_controllers(board)
             self.ruby_system.num_of_sequencers = len(
                 self.core_clusters
-            ) * 2 + len(self.dma_controllers)
+            ) * 2 + len(dma_controllers)
         else:
+            dma_controllers = [] 
             self.ruby_system.num_of_sequencers = len(self.core_clusters) * 2
 
 
@@ -320,7 +321,7 @@ class L3CacheHierarchy(AbstractRubyCacheHierarchy):
             + l2_caches
             + [self.l3cache]
             + self.memory_controllers
-            + self.dma_controllers
+            + dma_controllers
         )
 
         self.ruby_system.network.setup_buffers()
