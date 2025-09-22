@@ -45,36 +45,35 @@ from gem5.components.boards.x86_board import X86Board
 from gem5.components.memory.single_channel import SingleChannelDDR3_1600
 from gem5.components.processors.cpu_types import CPUTypes
 from gem5.components.processors.simple_switchable_processor import (
-    SimpleSwitchableProcessor,
+    SimpleSwitchableProcessor, SwitchableProcessor
 )
+from gem5.components.processors.simple_core import SimpleCore
+
 from gem5.isas import ISA
-from gem5.resources.resource import obtain_resource
+from gem5.resources.resource import(obtain_resource, DiskImageResource,
+    KernelResource)
 from gem5.simulate.exit_event import ExitEvent
 from gem5.simulate.simulator import Simulator
 from gem5.utils.requires import requires
 
-# This runs a check to ensure the gem5 binary is compiled to X86 and to the
-# MESI Two Level coherence protocol.
+from gem5.components.cachehierarchies.chi.l3_cache_hierarchy import (
+    L3CacheHierarchy,
+)
+
+
+# This runs a check to ensure the gem5 binary is compiled to X86
 requires(
     isa_required=ISA.X86,
-    coherence_protocol_required=CoherenceProtocol.MESI_TWO_LEVEL,
+    coherence_protocol_required=CoherenceProtocol.CHI,
     kvm_required=True,
 )
 
-from gem5.components.cachehierarchies.ruby.mesi_two_level_cache_hierarchy import (
-    MESITwoLevelCacheHierarchy,
-)
 
-# Here we setup a MESI Two Level Cache Hierarchy.
-cache_hierarchy = MESITwoLevelCacheHierarchy(
-    l1d_size="16KiB",
-    l1d_assoc=8,
-    l1i_size="16KiB",
-    l1i_assoc=8,
-    l2_size="256KiB",
-    l2_assoc=16,
-    num_l2_banks=1,
-)
+# CHI L3 clustered cache hierarchy
+cache_hierarchy = L3CacheHierarchy(
+    l1_size="16KiB", l1_assoc=8, l2_size="1MiB", l2_assoc=16, l3_size="16MiB", l3_assoc=32, cores_per_cluster=2)
+
+
 
 # Setup the system memory.
 memory = SingleChannelDDR3_1600(size="3GiB")
@@ -89,8 +88,33 @@ processor = SimpleSwitchableProcessor(
     starting_core_type=CPUTypes.KVM,
     switch_core_type=CPUTypes.TIMING,
     isa=ISA.X86,
-    num_cores=2,
+    num_cores=4,
 )
+
+# num_cores = 4
+
+# kvm_core_list    = [SimpleCore(cpu_type=CPUTypes.KVM, core_id=id_, isa=ISA.X86) for id_ in range(num_cores)]
+# atomic_core_list = [SimpleCore(cpu_type=CPUTypes.ATOMIC, core_id=id_, isa=ISA.X86) for id_ in range(num_cores)]
+# timing_core_list = [SimpleCore(cpu_type=CPUTypes.TIMING, core_id=id_, isa=ISA.X86) for id_ in range(num_cores)]
+
+# switchable_cores = {"KVM": kvm_core_list, "ATOMIC": atomic_core_list, "TIMING": timing_core_list}
+
+# processor = SwitchableProcessor(
+#     switchable_cores=switchable_cores,
+#     starting_cores="KVM",
+# )
+
+
+kernel_args = [
+    "root=/dev/sda2",
+    "device=/dev/sda",
+    "console=ttyS0",
+    "earlyprintk=ttyS0",
+    "mce=off",           # << add this
+    "no_systemd=true",
+    "interactive=true",
+]
+
 
 # Here we setup the board. The X86Board allows for Full-System X86 simulations.
 board = X86Board(
@@ -98,11 +122,25 @@ board = X86Board(
     processor=processor,
     memory=memory,
     cache_hierarchy=cache_hierarchy,
+    new_kernel_args=kernel_args
 )
 
 
-workload = obtain_resource("x86-ubuntu-24.04-boot-with-systemd")
-board.set_workload(workload)
+# add command to be executed immediately after boot
+command = ()
+
+board.set_kernel_disk_workload(
+
+    
+    kernel=obtain_resource(
+        "x86-linux-kernel-6.8.0-52-generic", resource_version="1.0.0"
+    ),
+
+    # disk image is currently stored locally in /mnt within docker
+    disk_image=DiskImageResource(local_path="/mnt/x86-ubuntu-22.04-img"),
+
+    readfile_contents=command,
+)
 
 
 def exit_event_handler():
@@ -112,13 +150,17 @@ def exit_event_handler():
     # The after_boot.sh script is executed after the kernel and systemd have
     # booted.
     # Here we switch the CPU type to Timing.
-    print("Switching to Timing CPU")
-    processor.switch()
+    
+    # processor.switch()
     yield False  # gem5 is now executing the `after_boot.sh` script
     print("Third exit: Finished `after_boot.sh` script")
+    
+    print("Switching to Timing CPU")
+    processor.switch()
+
     # The after_boot.sh script will run a script if it is passed via
     # m5 readfile. This is the last exit event before the simulation exits.
-    yield True
+    yield False
 
 
 simulator = Simulator(
