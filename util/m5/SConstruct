@@ -60,6 +60,10 @@ if GetOption('debug_build'):
 else:
     main.Append(CXXFLAGS=[ '-O2' ])
     main.Append(CCFLAGS=[ '-O2' ])
+
+main.Append(CXXFLAGS=[ '-fPIC' ])
+main.Append(CCFLAGS=[ '-fPIC' ])
+
 main.Append(CPPPATH=[ common_include ])
 main.Append(CXXFLAGS=[ '-std=c++14' ])
 
