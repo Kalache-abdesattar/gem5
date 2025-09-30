@@ -78,6 +78,13 @@ in_port(rspInPort, CHIResponseMsg, rspIn, rank=10,
   if (rspInPort.isReady(clockEdge())) {
     printResources();
     peek(rspInPort, CHIResponseMsg) {
+
+      if(in_msg.addr == 0){
+        DPRINTF(ChiSlicc, 
+          "[rspInPort][Receiver Node ID (version): %d] in_msg: type=%s addr=%#x responder=%d destination=%d \n",
+          version, in_msg.type, in_msg.addr, in_msg.responder, in_msg.Destination);
+      }
+
       if (in_msg.usesTxnId) {
         // A ResponseMsg that uses transaction ID
         // is separate from the memory system,
@@ -171,6 +178,18 @@ in_port(snpInPort, CHIRequestMsg, snpIn, rank=7) {
     assert(is_HN == false);
     printResources();
     peek(snpInPort, CHIRequestMsg) {
+
+      TBE tbe := getCurrentActiveTBE(in_msg.addr);
+      CacheEntry cache_entry := getCacheEntry(in_msg.addr);
+      State curr_state := getState(tbe, cache_entry, in_msg.addr);
+
+      if(in_msg.addr == 0){
+        DPRINTF(ChiSlicc,
+                "[snpInPort][Receiver Node ID (version): %d] in_msg: type=%s addr=%#x STATE=%s requestor=%d\n",
+                version, in_msg.type, in_msg.addr, curr_state,
+                in_msg.requestor);
+      }
+
       assert(in_msg.allowRetry == false);
       if (in_msg.usesTxnId) {
         TBE preexistingTBE := getDvmTBE(in_msg.txnId);
@@ -375,6 +394,18 @@ in_port(reqInPort, CHIRequestMsg, reqIn, rank=2,
   if (reqInPort.isReady(clockEdge())) {
     printResources();
     peek(reqInPort, CHIRequestMsg) {
+      TBE tbe := getCurrentActiveTBE(in_msg.addr);
+      CacheEntry cache_entry := getCacheEntry(in_msg.addr);
+      State curr_state := getState(tbe, cache_entry, in_msg.addr);
+
+      // Print useful metadata of the request message
+      if(in_msg.addr == 0){
+        DPRINTF(ChiSlicc, 
+              "[reqInPort][Receiver Node ID (version): %d] in_msg: type=%s addr=%#x STATE=%s requestor=%d\n",
+              version, in_msg.type, in_msg.addr, curr_state,
+              in_msg.requestor);
+      }
+
       // DVM Sync and TLBIs from external sources will use txnId requests,
       // but they aren't implemented yet.
       assert(!in_msg.usesTxnId);

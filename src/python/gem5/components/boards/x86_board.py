@@ -82,6 +82,7 @@ class X86Board(AbstractSystemBoard, KernelDiskWorkload, SEBinaryWorkload):
         processor: AbstractProcessor,
         memory: AbstractMemorySystem,
         cache_hierarchy: AbstractCacheHierarchy,
+        new_kernel_args
     ) -> None:
         super().__init__(
             clk_freq=clk_freq,
@@ -89,6 +90,8 @@ class X86Board(AbstractSystemBoard, KernelDiskWorkload, SEBinaryWorkload):
             memory=memory,
             cache_hierarchy=cache_hierarchy,
         )
+
+        self._new_kernel_args = new_kernel_args
 
         if self.get_processor().get_isa() != ISA.X86:
             raise Exception(
@@ -300,7 +303,7 @@ class X86Board(AbstractSystemBoard, KernelDiskWorkload, SEBinaryWorkload):
         if self.has_io_bus():
             return self.iobus
         else:
-            raise Exception(
+            raise Exception( 
                 "Cannot execute `get_io_bus()`: Board does not have an I/O "
                 "bus to return. Use `has_io_bus()` to check this."
             )
@@ -370,10 +373,11 @@ class X86Board(AbstractSystemBoard, KernelDiskWorkload, SEBinaryWorkload):
 
     @overrides(KernelDiskWorkload)
     def get_default_kernel_args(self) -> List[str]:
-        return [
-            "earlyprintk=ttyS0",
-            "console=ttyS0",
-            "lpj=7999923",
-            "root={root_value}",
-            "disk_device={disk_device}",
-        ]
+        # return [
+        #     "earlyprintk=ttyS0",
+        #     "console=ttyS0",
+        #     "lpj=7999923",
+        #     "root={root_value}1",
+        #     "disk_device={disk_device}",
+        # ]
+        return self._new_kernel_args

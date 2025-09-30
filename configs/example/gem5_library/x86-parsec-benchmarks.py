@@ -43,6 +43,8 @@ scons build/X86/gem5.opt
     --benchmark <benchmark_name> \
     --size <simulation_size>
 ```
+
+## build/X86_CUSTOM/gem5.opt configs/example/gem5_library/x86-parsec-benchmarks.py --benchmark blackscholes --size simsmall
 """
 import argparse
 import time
@@ -58,16 +60,24 @@ from gem5.components.processors.simple_switchable_processor import (
     SimpleSwitchableProcessor,
 )
 from gem5.isas import ISA
-from gem5.resources.resource import obtain_resource
+from gem5.resources.resource import(obtain_resource, DiskImageResource,
+    KernelResource)
 from gem5.simulate.exit_event import ExitEvent
 from gem5.simulate.simulator import Simulator
 from gem5.utils.requires import requires
+
+
+from gem5.components.cachehierarchies.chi.l3_cache_hierarchy import (
+    L3CacheHierarchy,
+)
+
+
 
 # We check for the required gem5 build.
 
 requires(
     isa_required=ISA.X86,
-    coherence_protocol_required=CoherenceProtocol.MESI_TWO_LEVEL,
+    #coherence_protocol_required=CoherenceProtocol.MESI_TWO_LEVEL,
     kvm_required=True,
 )
 
@@ -123,20 +133,45 @@ from gem5.components.cachehierarchies.ruby.mesi_two_level_cache_hierarchy import
     MESITwoLevelCacheHierarchy,
 )
 
-cache_hierarchy = MESITwoLevelCacheHierarchy(
-    l1d_size="32KiB",
-    l1d_assoc=8,
-    l1i_size="32KiB",
-    l1i_assoc=8,
-    l2_size="256KiB",
-    l2_assoc=16,
-    num_l2_banks=2,
+from gem5.components.cachehierarchies.classic.no_cache import (
+    NoCache,
 )
+
+# 2 cores
+### (MESI) Simulated time in ROI: 141482095615
+### (NONE) Simulated time in ROI: 
+
+# 4 cores
+### Simulated time in ROI:  143235949672
+### Simulated time in ROI: 7988803916949
+
+# 8 cores
+### Simulated time in ROI: 139638271285
+### Simulated time in ROI: 
+
+
+
+# cache_hierarchy = MESITwoLevelCacheHierarchy(
+#     l1d_size="32KiB",
+#     l1d_assoc=8,
+#     l1i_size="32KiB",
+#     l1i_assoc=8,
+#     l2_size="256KiB",
+#     l2_assoc=16,
+#     num_l2_banks=8,
+# )
+
+# cache_hierarchy = NoCache()
+
+cache_hierarchy = L3CacheHierarchy(
+    l1_size="16KiB", l1_assoc=8, l2_size="512KiB", l2_assoc=8, l3_size="16MiB", l3_assoc=16, cores_per_cluster=1)
+
 
 # Memory: Dual Channel DDR4 2400 DRAM device.
 # The X86 board only supports 3 GiB of main memory.
 
 memory = DualChannelDDR4_2400(size="3GiB")
+
 
 # Here we setup the processor. This is a special switchable processor in which
 # a starting core type and a switch core type must be specified. Once a
@@ -147,9 +182,9 @@ memory = DualChannelDDR4_2400(size="3GiB")
 
 processor = SimpleSwitchableProcessor(
     starting_core_type=CPUTypes.KVM,
-    switch_core_type=CPUTypes.TIMING,
+    switch_core_type=CPUTypes.O3,
     isa=ISA.X86,
-    num_cores=2,
+    num_cores=8,
 )
 
 # Here we setup the board. The X86Board allows for Full-System X86 simulations
@@ -181,26 +216,34 @@ command = (
     + "sleep 5;"
     + "m5 exit;"
 )
+
+
+
+
 board.set_kernel_disk_workload(
-    # The x86 linux kernel will be automatically downloaded to the
-    # `~/.cache/gem5` directory if not already present.
-    # PARSEC benchamarks were tested with kernel version 4.19.83
+    # kernel=KernelResource(
+    #     local_path="/opt/parsec-tests/kernel/x86-linux-kernel-4.19.83"),
+    
     kernel=obtain_resource(
         "x86-linux-kernel-4.19.83", resource_version="1.0.0"
     ),
-    # The x86-parsec image will be automatically downloaded to the
-    # `~/.cache/gem5` directory if not already present.
+
     disk_image=obtain_resource("x86-parsec", resource_version="1.0.0"),
+
     readfile_contents=command,
 )
-
 
 # functions to handle different exit events during the simuation
 def handle_workbegin():
     print("Done booting Linux")
     print("Resetting stats at the start of ROI!")
     m5.stats.reset()
+
     processor.switch()
+
+    # print("Take a checkpoint")
+    # simulator.save_checkpoint("parsec_cpt")
+    
     yield False
 
 
@@ -212,11 +255,14 @@ def handle_workend():
 
 simulator = Simulator(
     board=board,
+
+    # checkpoint_path="/opt/gem5/parsec_cpt",
     on_exit_event={
         ExitEvent.WORKBEGIN: handle_workbegin(),
         ExitEvent.WORKEND: handle_workend(),
     },
 )
+
 
 # We maintain the wall clock time.
 

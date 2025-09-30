@@ -34,6 +34,8 @@
  * that the ABI in the arch directory will also need to be updated.
  */
 
+#define M5OP_PIC
+
 .macro  m5op_func, name, func
         .globl \name
         .func \name

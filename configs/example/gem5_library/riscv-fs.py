@@ -43,6 +43,20 @@ from gem5.components.boards.riscv_board import RiscvBoard
 from gem5.components.cachehierarchies.classic.private_l1_private_l2_walk_cache_hierarchy import (
     PrivateL1PrivateL2WalkCacheHierarchy,
 )
+
+from gem5.components.cachehierarchies.chi.l3_cache_hierarchy import (
+    L3CacheHierarchy,
+)
+
+from gem5.components.cachehierarchies.chi.private_l1_shared_l2_cache_hierarchy import (
+    PrivateL1SharedL2CacheHierarchy,
+)
+
+
+from gem5.components.cachehierarchies.classic.no_cache import (
+    NoCache,
+)
+
 from gem5.components.memory import SingleChannelDDR3_1600
 from gem5.components.processors.cpu_types import CPUTypes
 from gem5.components.processors.simple_processor import SimpleProcessor
@@ -51,22 +65,35 @@ from gem5.resources.resource import obtain_resource
 from gem5.simulate.simulator import Simulator
 from gem5.utils.requires import requires
 
+from gem5.resources.resource import(obtain_resource, DiskImageResource,
+    KernelResource)
+
+from gem5.simulate.exit_event import ExitEvent
+
+import m5
+
 # Run a check to ensure the right version of gem5 is being used.
 requires(isa_required=ISA.RISCV)
 
 # Setup the cache hierarchy.
 # For classic, PrivateL1PrivateL2 and NoCache have been tested.
 # For Ruby, MESI_Two_Level and MI_example have been tested.
-cache_hierarchy = PrivateL1PrivateL2WalkCacheHierarchy(
-    l1d_size="32KiB", l1i_size="32KiB", l2_size="512KiB"
-)
+# cache_hierarchy = PrivateL1PrivateL2WalkCacheHierarchy(
+#     l1d_size="32KiB", l1i_size="32KiB", l2_size="512KiB"
+# )
+
+# cache_hierarchy = NoCache()
+
+cache_hierarchy = L3CacheHierarchy(
+    l1_size="16KiB", l1_assoc=8, l2_size="1MiB", l2_assoc=16, l3_size="16MiB", l3_assoc=32, cores_per_cluster=2)
+
 
 # Setup the system memory.
 memory = SingleChannelDDR3_1600()
 
 # Setup a single core Processor.
 processor = SimpleProcessor(
-    cpu_type=CPUTypes.TIMING, isa=ISA.RISCV, num_cores=1
+    cpu_type=CPUTypes.ATOMIC, isa=ISA.RISCV, num_cores=4
 )
 
 # Setup the board.
@@ -77,15 +104,55 @@ board = RiscvBoard(
     cache_hierarchy=cache_hierarchy,
 )
 
+
+command = (
+    f"root;"
+    + "m5 exit;" 
+)
+
+
+
 # Set the Full System workload.
 board.set_kernel_disk_workload(
     kernel=obtain_resource(
         "riscv-bootloader-vmlinux-5.10", resource_version="1.0.0"
     ),
-    disk_image=obtain_resource("riscv-disk-img", resource_version="1.0.0"),
+    #disk_image=obtain_resource("riscv-disk-img", resource_version="1.0.0"),
+    
+    disk_image=DiskImageResource(local_path="/mnt/riscv-disk-img"),
+    
+    # readfile_contents = command,
 )
 
-simulator = Simulator(board=board)
+
+# functions to handle different exit events during the simuation
+def handle_workbegin():
+    print("Done booting Linux")
+    print("Resetting stats at the start of ROI!")
+    m5.stats.reset()
+
+    print("Take a checkpoint")
+    simulator.save_checkpoint("riscv_checkpoint")
+    
+    yield False
+
+
+def handle_workend():
+    print("Dump stats at the end of the ROI!")
+    m5.stats.dump()
+    yield True
+
+
+
+simulator = Simulator(
+    board=board,
+
+    checkpoint_path="/opt/gem5/riscv_checkpoint",
+    on_exit_event={
+        ExitEvent.WORKBEGIN: handle_workbegin(),
+        ExitEvent.WORKEND: handle_workend(),
+    },
+)
 print("Beginning simulation!")
 # Note: This simulation will never stop. You can access the terminal upon boot
 # using m5term (`./util/term`): `./m5term localhost <port>`. Note the `<port>`

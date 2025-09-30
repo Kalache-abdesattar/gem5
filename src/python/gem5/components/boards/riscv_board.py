@@ -89,8 +89,12 @@ class RiscvBoard(AbstractSystemBoard, KernelDiskWorkload, SEBinaryWorkload):
         processor: AbstractProcessor,
         memory: AbstractMemorySystem,
         cache_hierarchy: AbstractCacheHierarchy,
+        new_kernel_args
     ) -> None:
+
         super().__init__(clk_freq, processor, memory, cache_hierarchy)
+        
+        self._new_kernel_args = new_kernel_args
 
         if processor.get_isa() != ISA.RISCV:
             raise Exception(
@@ -570,9 +574,11 @@ class RiscvBoard(AbstractSystemBoard, KernelDiskWorkload, SEBinaryWorkload):
 
     @overrides(KernelDiskWorkload)
     def get_default_kernel_args(self) -> List[str]:
-        return [
-            "console=ttyS0",
-            "root={root_value}",
-            "disk_device={disk_device}",
-            "rw",
-        ]
+        # default_args = [
+        #     "console=ttyS0",
+        #     "root={root_value}",
+        #     "disk_device={disk_device}",
+        #     "rw",
+        # ]
+
+        return self._new_kernel_args 

@@ -53,6 +53,7 @@ assert len(default_call_type) == 1, \
 default_call_type = default_call_type[0]
 
 static_env = env.Clone()
+static_env.Append(CCFLAGS='-fPIC', CXXFLAGS='-fPIC', ASFLAGS=['-fPIC']) 
 static_env.Append(LINKFLAGS=[ '-no-pie', '-static' ])
 
 #
@@ -75,6 +76,7 @@ m5_bin = static_env.Program('out/m5', ct_support +
 
 # The shared version of the m5 op call sights, used by mutliple targets below.
 shared_env = env.Clone()
+shared_env.Append(CCFLAGS='-fPIC', CXXFLAGS='-fPIC', ASFLAGS=['-fPIC'])
 shared_env.Append(ASFLAGS='-DM5OP_PIC')
 m5op_shared = shared_env.SharedObject(all_m5ops)
 
