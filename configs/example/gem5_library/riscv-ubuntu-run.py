@@ -48,7 +48,8 @@ from gem5.components.memory import (DualChannelDDR4_2400, SingleChannelDDR3_1600
 from gem5.components.processors.cpu_types import CPUTypes
 from gem5.components.processors.simple_processor import SimpleProcessor
 from gem5.isas import ISA
-from gem5.resources.resource import obtain_resource
+from gem5.resources.resource import(obtain_resource, DiskImageResource,
+    KernelResource)
 from gem5.simulate.exit_event import ExitEvent
 from gem5.simulate.simulator import Simulator
 from gem5.utils.requires import requires
@@ -79,9 +80,9 @@ from gem5.components.cachehierarchies.classic.no_cache import (
 # )
 
 cache_hierarchy = L3CacheHierarchy(
-    l1_size="16KiB", l1_assoc=8, l2_size="1MiB", l2_assoc=16, l3_size="16MiB", l3_assoc=32, cores_per_cluster=2)
+    l1_size="16KiB", l1_assoc=8, l2_size="1MiB", l2_assoc=16, l3_size="16MiB", l3_assoc=32, cores_per_cluster=1)
 
-# cache_hierarchy = NoCache()
+cache_hierarchy = NoCache()
 
 # Memory: Dual Channel DDR4 2400 DRAM device.
 
@@ -97,7 +98,7 @@ memory = SingleChannelDDR3_1600()
 # )
 
 processor = SimpleSwitchableProcessor(
-    starting_core_type=CPUTypes.TIMING,
+    starting_core_type=CPUTypes.ATOMIC,
     switch_core_type=CPUTypes.TIMING,
     isa=ISA.RISCV,
     num_cores=4,
@@ -126,13 +127,29 @@ board = RiscvBoard(
 )
 
 
-# Here we a full system workload: "riscv-ubuntu-20.04-boot" which boots
-# Ubuntu 20.04. Once the system successfully boots it encounters an `m5_exit`
+# Here we a full system workload: "riscv-ubuntu-24.04-img" which boots
+# Ubuntu 24.04. Once the system successfully boots it encounters an `m5_exit`
 # instruction which stops the simulation. When the simulation has ended you may
 # inspect `m5out/system.pc.com_1.device` to see the stdout.
-board.set_workload(
-    obtain_resource("riscv-ubuntu-24.04-boot", resource_version="1.0.0")
+
+# add command to be executed immediately after boot
+command = ()
+
+board.set_kernel_disk_workload(
+    
+    
+    kernel=obtain_resource(
+        "riscv-linux-6.6.33-kernel", resource_version="1.0.0"
+    ),
+
+    bootloader=obtain_resource("riscv-bootloader-opensbi-1.3.1", resource_version="1.0.0"),
+
+    # disk image is currently stored locally in /mnt within docker
+    disk_image=DiskImageResource(local_path="/mnt/riscv-ubuntu-24.04-img"),
+
+    readfile_contents=command,
 )
+
 
 
 def exit_event_handler():
