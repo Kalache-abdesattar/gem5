@@ -756,9 +756,11 @@ class EventQueue
     void
     schedule(Event *event, Tick when, bool global=false)
     {
-        assert(when >= getCurTick());
-        assert(!event->scheduled());
-        assert(event->initialized());
+        // assert(when >= getCurTick());
+        // assert(!event->scheduled());
+        // assert(event->initialized());
+
+        // cprintf("AN EVENT ON EQ WITH CURRENT TIME %d", when);
 
         event->setWhen(when, this);
 

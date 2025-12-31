@@ -107,6 +107,9 @@ class ChanneledMemory(AbstractMemorySystem):
         self._dram_class = dram_interface_class
         self._num_channels = num_channels
 
+        self.eventq_index = 1
+        print(f"Setting the eventq idx for memory to : " + str(self.eventq_index))
+
         if not _isPow2(interleaving_size):
             raise ValueError("Memory interleaving size should be a power of 2")
         self._intlv_size = interleaving_size

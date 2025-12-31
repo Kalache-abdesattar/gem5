@@ -168,7 +168,7 @@ class BaseGlobalEventTemplate : public BaseGlobalEvent
 
 
 /**
- * The main global event class.  Ordinary global events should derive
+ * The main global eentv class.  Ordinary global events should derive
  * from this class, and define process() to specify the action to be
  * taken when the event is reached.  All threads will synchronize at a
  * barrier, exactly one of the threads will execute the process()

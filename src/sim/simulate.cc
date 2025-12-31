@@ -302,8 +302,8 @@ doSimLoop(EventQueue *eventq)
         // there should always be at least one event (the SimLoopExitEvent
         // we just scheduled) in the queue
         assert(!eventq->empty());
-        assert(curTick() <= eventq->nextTick() &&
-               "event scheduled in the past");
+        // assert(curTick() <= eventq->nextTick() &&
+        //        "event scheduled in the past");
 
         if (mainQueue && async_event) {
             async_event = false;

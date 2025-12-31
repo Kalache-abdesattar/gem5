@@ -440,6 +440,9 @@ class AbstractBoard:
             ),
             board=self,
         )
+        
+        print("TIME QUANTUM SET ")
+        root.sim_quantum = 10
 
         # 3. Call any of the components' `_pre_instantiate` functions.
         self.get_processor()._pre_instantiate(root)
