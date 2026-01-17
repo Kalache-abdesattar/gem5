@@ -302,9 +302,6 @@ TLB::checkPermissions(ThreadContext* tc, MemAccessInfo mem_access, Addr vaddr,
         }
     }
 
-    // bypass permission checks
-    pf = false;
-
     return pf ? createPagefault(vaddr, mode, gvaddr, gpf, virt) : NoFault;
 }
 
