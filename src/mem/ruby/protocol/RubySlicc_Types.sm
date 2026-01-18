@@ -237,6 +237,9 @@ structure (CacheMemory, external = "yes") {
   void profileDemandMiss();
   void profilePrefetchHit();
   void profilePrefetchMiss();
+  
+  void recordEviction(Addr, bool);
+  void checkShadowTag(Addr);
 }
 
 structure (WireBuffer, inport="yes", outport="yes", external = "yes") {

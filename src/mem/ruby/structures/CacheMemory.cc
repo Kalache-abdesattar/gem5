@@ -72,6 +72,8 @@ CacheMemory::CacheMemory(const Params &p)
     dataArray(p.dataArrayBanks, p.dataAccessLatency, p.start_index_bit),
     tagArray(p.tagArrayBanks, p.tagAccessLatency, p.start_index_bit),
     atomicALUArray(p.atomicALUs, p.atomicLatency),
+    m_enable_shadow_tags(p.enable_shadow_tags),
+    m_sta_size(p.sta_size),
     cacheMemoryStats(this)
 {
     m_cache_size = p.size;
@@ -332,6 +334,52 @@ CacheMemory::allocate(Addr address, AbstractCacheEntry *entry)
     panic("Allocate didn't find an available entry");
 }
 
+
+void 
+CacheMemory::checkShadowTag(Addr address)
+{   
+    if (!m_enable_shadow_tags) return;
+    
+    Addr line_addr = makeLineAddress(address);
+    auto it = m_sta_map.find(line_addr);
+
+    if (it != m_sta_map.end()) {
+        if (it->second == EvictionType::Coherence) {
+            cacheMemoryStats.m_demand_misses_coherence++;
+        } else {
+            cacheMemoryStats.m_demand_misses_conflict++;
+        }
+    } else {
+        cacheMemoryStats.m_demand_misses_cold++;
+    }
+}
+
+
+void 
+CacheMemory::recordEviction(Addr address, bool is_coherence)
+{   
+    if (!m_enable_shadow_tags) return;
+
+    Addr line_addr = makeLineAddress(address);
+    EvictionType reason = is_coherence ? EvictionType::Coherence 
+                                       : EvictionType::CapacityConflict;
+
+    // Remove if exists to update position
+    if (m_sta_map.count(line_addr)) {
+        m_sta_lru_list.remove(line_addr);
+        m_sta_map.erase(line_addr);
+    } else if (m_sta_lru_list.size() >= m_sta_size) {
+        // Enforce hardcoded size limit
+        Addr oldest = m_sta_lru_list.back();
+        m_sta_lru_list.pop_back();
+        m_sta_map.erase(oldest);
+    }
+
+    m_sta_lru_list.push_front(line_addr);
+    m_sta_map[line_addr] = reason;
+}
+
+
 void
 CacheMemory::deallocate(Addr address)
 {
@@ -344,6 +392,8 @@ CacheMemory::deallocate(Addr address)
     delete entry;
     m_cache[cache_set][way] = NULL;
     m_tag_index.erase(address);
+
+    recordEviction(address, false);
 }
 
 // Returns with the physical address of the conflicting cache line
@@ -566,6 +616,9 @@ CacheMemoryStats::CacheMemoryStats(statistics::Group *parent)
                                       "transaction"),
       ADD_STAT(m_demand_hits, "Number of cache demand hits"),
       ADD_STAT(m_demand_misses, "Number of cache demand misses"),
+      ADD_STAT(m_demand_misses_cold, "Number of COLD cache demand misses"),
+      ADD_STAT(m_demand_misses_conflict, "Number of CONFLICT cache demand misses"),
+      ADD_STAT(m_demand_misses_coherence, "Number of COHERENCE cache demand misses"),
       ADD_STAT(m_demand_accesses, "Number of cache demand accesses",
                m_demand_hits + m_demand_misses),
       ADD_STAT(m_prefetch_hits, "Number of cache prefetch hits"),

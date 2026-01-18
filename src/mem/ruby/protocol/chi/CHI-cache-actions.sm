@@ -1,3 +1,4 @@
+
 /*
  * Copyright (c) 2021-2024 Arm Limited
  * All rights reserved
@@ -1421,6 +1422,7 @@ action(Initiate_InvalidationSnoop, desc="") {
     tbe.actions.pushNB(Event:TagArrayWrite);
   }
 
+  cache.recordEviction(tbe.addr, true);
   tbe.dataToBeInvalid := true;
 }
 
@@ -3786,6 +3788,7 @@ action(Profile_Miss, desc="") {
   bool is_demand := (tbe.is_local_pf || tbe.is_remote_pf) == false;
   bool is_remote_can_notify := tbe.is_remote_pf && upstream_prefetch_trains_prefetcher;
   if (is_demand) {
+    cache.checkShadowTag(tbe.addr);
     cache.profileDemandMiss();
   } else {
     assert(use_prefetcher || tbe.is_remote_pf);
