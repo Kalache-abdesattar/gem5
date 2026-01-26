@@ -42,6 +42,7 @@
 #ifndef __MEM_RUBY_STRUCTURES_CACHEMEMORY_HH__
 #define __MEM_RUBY_STRUCTURES_CACHEMEMORY_HH__
 
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -51,9 +52,11 @@
 #include "mem/ruby/common/DataBlock.hh"
 #include "mem/ruby/protocol/CacheRequestType.hh"
 #include "mem/ruby/protocol/CacheResourceType.hh"
+#include "mem/ruby/protocol/RubyRequest.hh"
 #include "mem/ruby/slicc_interface/AbstractCacheEntry.hh"
-#include "mem/ruby/structures/ALUFreeListArray.hh"
+#include "mem/ruby/slicc_interface/RubySlicc_ComponentMapping.hh"
 #include "mem/ruby/structures/BankedArray.hh"
+#include "mem/ruby/structures/ALUFreeListArray.hh"
 #include "mem/ruby/system/CacheRecorder.hh"
 #include "params/RubyCache.hh"
 #include "sim/sim_object.hh"
@@ -153,6 +156,9 @@ class CacheMemory : public SimObject
 
     void setRubySystem(RubySystem* rs);
 
+    // Records an eviction into the shadow tag array
+    void recordEviction(Addr address, bool is_coherence);
+
   public:
     int getCacheSize() const { return m_cache_size; }
     int getCacheAssoc() const { return m_cache_assoc; }
@@ -187,6 +193,16 @@ class CacheMemory : public SimObject
     BankedArray dataArray;
     BankedArray tagArray;
     ALUFreeListArray atomicALUArray;
+
+    // Shadow Tag Array Parameters
+    enum class EvictionType { CapacityConflict, Coherence };
+
+    bool m_enable_shadow_tags;
+    int m_sta_size; // Number of ghost tags to track
+
+    // Map address to the reason it left the cache
+    std::unordered_map<Addr, EvictionType> m_sta_map; 
+    std::list<Addr> m_sta_lru_list;
 
     int m_cache_size;
     int m_cache_num_sets;
@@ -246,6 +262,11 @@ class CacheMemory : public SimObject
           statistics::Scalar m_demand_misses;
           statistics::Formula m_demand_accesses;
 
+          statistics::Scalar m_demand_misses_conflict;
+          statistics::Scalar m_demand_misses_cold;
+          statistics::Scalar m_demand_misses_coherence;
+
+
           statistics::Scalar m_prefetch_hits;
           statistics::Scalar m_prefetch_misses;
           statistics::Formula m_prefetch_accesses;
@@ -260,6 +281,11 @@ class CacheMemory : public SimObject
       void profileDemandMiss();
       void profilePrefetchHit();
       void profilePrefetchMiss();
+      
+      // Checks if the address was recently evicted
+      void checkShadowTag(Addr address);
+
+
 };
 
 std::ostream& operator<<(std::ostream& out, const CacheMemory& obj);

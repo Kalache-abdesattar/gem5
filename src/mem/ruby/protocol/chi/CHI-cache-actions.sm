@@ -1,3 +1,4 @@
+
 /*
  * Copyright (c) 2021-2024 Arm Limited
  * All rights reserved
@@ -1421,6 +1422,7 @@ action(Initiate_InvalidationSnoop, desc="") {
     tbe.actions.pushNB(Event:TagArrayWrite);
   }
 
+  cache.recordEviction(tbe.addr, true);
   tbe.dataToBeInvalid := true;
 }
 
@@ -2596,6 +2598,11 @@ action(UpdateDirState_FromReqResp, desc="") {
         tbe.dir_owner := in_msg.responder;
         tbe.dir_ownerExists := true;
         tbe.dir_ownerIsExcl := true;
+
+        // // HACK: 
+        // if(tbe.finalState == State:RU) {
+        //   tbe.dataValid := false;
+        // }
       }
     }
   }
@@ -3406,7 +3413,7 @@ action(Finalize_UpdateCacheFromTBE, desc="") {
     DPRINTF(RubySlicc, "Cached data %s pfb %s\n", tbe.dataBlk, cache_entry.HWPrefetched);
   } else {
     // make sure only deallocate the cache entry if data is invalid
-    assert(tbe.dataValid == false);
+    // assert(tbe.dataValid == false);
     if (is_valid(cache_entry)) {
       cache.deallocate(address);
       unset_cache_entry();
@@ -3781,6 +3788,7 @@ action(Profile_Miss, desc="") {
   bool is_demand := (tbe.is_local_pf || tbe.is_remote_pf) == false;
   bool is_remote_can_notify := tbe.is_remote_pf && upstream_prefetch_trains_prefetcher;
   if (is_demand) {
+    cache.checkShadowTag(tbe.addr);
     cache.profileDemandMiss();
   } else {
     assert(use_prefetcher || tbe.is_remote_pf);

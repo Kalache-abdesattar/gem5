@@ -33,6 +33,7 @@ from typing import (
 
 import m5
 from m5.objects import (
+    AddrRange,
     BadAddr,
     Bridge,
     CowDiskImage,
@@ -41,21 +42,14 @@ from m5.objects import (
     HiFive,
     IGbE_e1000,
     IOXBar,
-    PciBus,
     PMAChecker,
+    Port,
     RawDiskImage,
     RiscvBootloaderKernelWorkload,
     RiscvMmioVirtIO,
     RiscvRTC,
-    RiscvSystem,
-    Root,
-    SimObject,
     VirtIOBlock,
     VirtIORng,
-)
-from m5.params import (
-    AddrRange,
-    Port,
 )
 from m5.util.fdthelper import (
     Fdt,
@@ -73,13 +67,11 @@ from ...utils.override import overrides
 from ..cachehierarchies.abstract_cache_hierarchy import AbstractCacheHierarchy
 from ..memory.abstract_memory_system import AbstractMemorySystem
 from ..processors.abstract_processor import AbstractProcessor
-from .abstract_board import AbstractBoard
+from .abstract_system_board import AbstractSystemBoard
 from .kernel_disk_workload import KernelDiskWorkload
 
 
-class RiscvBoard(
-    RiscvSystem, AbstractBoard, KernelDiskWorkload, SEBinaryWorkload
-):
+class RiscvBoard(AbstractSystemBoard, KernelDiskWorkload, SEBinaryWorkload):
     """
     A board capable of full system simulation for RISC-V.
 
@@ -97,11 +89,12 @@ class RiscvBoard(
         processor: AbstractProcessor,
         memory: AbstractMemorySystem,
         cache_hierarchy: AbstractCacheHierarchy,
+        new_kernel_args
     ) -> None:
-        super().__init__()
-        AbstractBoard.__init__(
-            self, clk_freq, processor, memory, cache_hierarchy
-        )
+
+        super().__init__(clk_freq, processor, memory, cache_hierarchy)
+        
+        self._new_kernel_args = new_kernel_args
 
         if processor.get_isa() != ISA.RISCV:
             raise Exception(
@@ -110,7 +103,7 @@ class RiscvBoard(
                 f"'{processor.get_isa().name}'."
             )
 
-    @overrides(AbstractBoard)
+    @overrides(AbstractSystemBoard)
     def _setup_board(self) -> None:
         if self.is_fullsystem():
             self.workload = RiscvBootloaderKernelWorkload()
@@ -164,26 +157,16 @@ class RiscvBoard(
     def _setup_io_devices(self) -> None:
         """Connect the I/O devices to the I/O bus."""
         # Add PCI
-        self.iobus.mem_side_ports = self.platform.pci_host.up_response_port()
-        self.iobus.cpu_side_ports = self.platform.pci_host.up_request_port()
-        self.platform.pci_bus.default = (
-            self.platform.pci_host.down_response_port()
-        )
-        self.platform.pci_bus.cpu_side_ports = (
-            self.platform.pci_host.down_request_port()
-        )
-        self.platform.pci_bus.config_error_port = (
-            self.platform.pci_host.config_error.pio
-        )
+        self.platform.pci_host.pio = self.iobus.mem_side_ports
 
         # Add Ethernet card
         self.ethernet = IGbE_e1000(
-            pci_dev=0, pci_func=0, InterruptLine=1, InterruptPin=1
+            pci_bus=0, pci_dev=0, pci_func=0, InterruptLine=1, InterruptPin=1
         )
 
-        self.ethernet.upstream = self.platform.pci_host
-        self.ethernet.pio = self.platform.pci_bus.mem_side_ports
-        self.ethernet.dma = self.platform.pci_bus.cpu_side_ports
+        self.ethernet.host = self.platform.pci_host
+        self.ethernet.pio = self.iobus.mem_side_ports
+        self.ethernet.dma = self.iobus.cpu_side_ports
 
         if self.get_cache_hierarchy().is_ruby():
             for device in self._off_chip_devices + self._on_chip_devices:
@@ -229,22 +212,22 @@ class RiscvBoard(
                 uncacheable=uncacheable_range
             )
 
-    @overrides(AbstractBoard)
+    @overrides(AbstractSystemBoard)
     def has_dma_ports(self) -> bool:
         return False
 
-    @overrides(AbstractBoard)
+    @overrides(AbstractSystemBoard)
     def get_dma_ports(self) -> List[Port]:
         raise Exception(
             "Cannot execute `get_dma_ports()`: Board does not have DMA ports "
             "to return. Use `has_dma_ports()` to check this."
         )
 
-    @overrides(AbstractBoard)
+    @overrides(AbstractSystemBoard)
     def has_io_bus(self) -> bool:
         return self.is_fullsystem()
 
-    @overrides(AbstractBoard)
+    @overrides(AbstractSystemBoard)
     def get_io_bus(self) -> IOXBar:
         if self.has_io_bus():
             return self.iobus
@@ -254,25 +237,11 @@ class RiscvBoard(
                 "bus to return. Use `has_io_bus()` to check this."
             )
 
-    @overrides(AbstractBoard)
-    def has_pci_bus(self) -> bool:
-        return self.is_fullsystem()
-
-    @overrides(AbstractBoard)
-    def get_pci_bus(self) -> PciBus:
-        if self.has_pci_bus():
-            return self.platform.pci_bus
-        else:
-            raise Exception(
-                "Cannot execute `get_pci_bus()`: Board does not have an PCI "
-                "bus to return. Use `has_pci_bus()` to check this."
-            )
-
-    @overrides(AbstractBoard)
+    @overrides(AbstractSystemBoard)
     def has_coherent_io(self) -> bool:
         return self.is_fullsystem()
 
-    @overrides(AbstractBoard)
+    @overrides(AbstractSystemBoard)
     def get_mem_side_coherent_io_port(self) -> Port:
         if self.has_coherent_io():
             return self.iobus.mem_side_ports
@@ -283,7 +252,7 @@ class RiscvBoard(
                 "check this."
             )
 
-    @overrides(AbstractBoard)
+    @overrides(AbstractSystemBoard)
     def _setup_memory_ranges(self):
         memory = self.get_memory()
         mem_size = memory.get_size()
@@ -319,7 +288,7 @@ class RiscvBoard(
         node = FdtNode(f"chosen")
         bootargs = self.workload.command_line
         node.append(FdtPropertyStrings("bootargs", [bootargs]))
-        node.append(FdtPropertyStrings("stdout-path", ["/soc/uart@10000000"]))
+        node.append(FdtPropertyStrings("stdout-path", ["/uart@10000000"]))
         root.append(node)
 
         # See Documentation/devicetree/bindings/riscv/cpus.txt for details.
@@ -556,8 +525,8 @@ class RiscvBoard(
     def get_disk_device(self):
         return "/dev/vda"
 
-    @overrides(AbstractBoard)
-    def _pre_instantiate(self, full_system: Optional[bool] = None) -> Root:
+    @overrides(AbstractSystemBoard)
+    def _pre_instantiate(self, full_system: Optional[bool] = None):
         # This is a bit of a hack necessary to get the RiscDemoBoard working
         # At the time of writing the RiscvBoard does not support SE mode so
         # this branch looks pointless. However, the RiscvDemoBoard does and
@@ -567,14 +536,14 @@ class RiscvBoard(
         # all boards support both FS and SE modes.
         if self.is_fullsystem():
             if len(self._bootloader) > 0:
-                self.workload.bootloader_addr = 0x80000000
+                self.workload.bootloader_addr = 0x0
                 self.workload.bootloader_filename = self._bootloader[0]
                 self.workload.kernel_addr = 0x80200000
                 self.workload.entry_point = (
                     0x80000000  # Bootloader starting point
                 )
             else:
-                self.workload.kernel_addr = 0x80000000
+                self.workload.kernel_addr = 0x0
                 self.workload.entry_point = 0x80000000
 
             # Set up the device tree. We need to wait until pre-instantiate to
@@ -587,7 +556,7 @@ class RiscvBoard(
                 m5.options.outdir, "device.dtb"
             )
 
-        return super()._pre_instantiate(full_system=full_system)
+        super()._pre_instantiate(full_system=full_system)
 
     @overrides(KernelDiskWorkload)
     def _add_disk_to_board(self, disk_image: AbstractResource):
@@ -605,18 +574,11 @@ class RiscvBoard(
 
     @overrides(KernelDiskWorkload)
     def get_default_kernel_args(self) -> List[str]:
-        return [
-            "console=ttyS0",
-            "root={root_value}",
-            "disk_device={disk_device}",
-            "rw",
-        ]
+        # default_args = [
+        #     "console=ttyS0",
+        #     "root={root_value}",
+        #     "disk_device={disk_device}",
+        #     "rw",
+        # ]
 
-    @overrides(SimObject)
-    def createCCObject(self):
-        """We override this function as it is called in ``m5.instantiate``. This
-        means we can insert a check to ensure the ``_connect_things`` function
-        has been run.
-        """
-        super()._connect_things_check()
-        super().createCCObject()
+        return self._new_kernel_args 
