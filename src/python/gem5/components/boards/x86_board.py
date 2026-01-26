@@ -31,15 +31,13 @@ from typing import (
 )
 
 from m5.objects import (
-    Addr,
-    AddrRange,
     BaseXBar,
     Bridge,
     CowDiskImage,
     IdeDisk,
     IOXBar,
     Pc,
-    Port,
+    PciBus,
     RawDiskImage,
     X86ACPIMadt,
     X86ACPIMadtIntSourceOverride,
@@ -53,6 +51,11 @@ from m5.objects import (
     X86IntelMPIOIntAssignment,
     X86IntelMPProcessor,
     X86SMBiosBiosInformation,
+)
+from m5.params import (
+    Addr,
+    AddrRange,
+    Port,
 )
 from m5.util.convert import toMemorySize
 
@@ -104,6 +107,15 @@ class X86Board(AbstractSystemBoard, KernelDiskWorkload, SEBinaryWorkload):
         if self.is_fullsystem():
             self.pc = Pc()
 
+            # FIXME: There should have some latency added to transfer packets
+            # within the PCI bus/hierarchy, but adding them breaks X86 Board
+            # which will hang forever. The hanging can be reproduced b
+            # removing the following three lines then running gem5 with the
+            # "configs/example/gem5_library/x86-ubuntu-run.py" script.
+            self.pc.pci_bus.frontend_latency = 0
+            self.pc.pci_bus.forward_latency = 0
+            self.pc.pci_bus.response_latency = 0
+
             self.workload = X86FsLinux()
 
             # North Bridge
@@ -131,7 +143,9 @@ class X86Board(AbstractSystemBoard, KernelDiskWorkload, SEBinaryWorkload):
 
         # Setup memory system specific settings.
         if self.get_cache_hierarchy().is_ruby():
-            self.pc.attachIO(self.get_io_bus(), [self.pc.south_bridge.ide.dma])
+            self.pc.attachIO(
+                self.get_io_bus(), [self.pc.pci_host.up_request_port()]
+            )
         else:
             self.bridge = Bridge(delay="50ns")
             self.bridge.mem_side_port = self.get_io_bus().cpu_side_ports
@@ -203,6 +217,7 @@ class X86Board(AbstractSystemBoard, KernelDiskWorkload, SEBinaryWorkload):
         )
 
         pci_bus = X86IntelMPBus(bus_id=0, bus_type="PCI   ")
+
         base_entries.append(pci_bus)
         isa_bus = X86IntelMPBus(bus_id=1, bus_type="ISA   ")
         base_entries.append(isa_bus)
@@ -303,9 +318,23 @@ class X86Board(AbstractSystemBoard, KernelDiskWorkload, SEBinaryWorkload):
         if self.has_io_bus():
             return self.iobus
         else:
-            raise Exception( 
+            raise Exception(
                 "Cannot execute `get_io_bus()`: Board does not have an I/O "
                 "bus to return. Use `has_io_bus()` to check this."
+            )
+
+    @overrides(AbstractSystemBoard)
+    def has_pci_bus(self) -> bool:
+        return self.is_fullsystem()
+
+    @overrides(AbstractSystemBoard)
+    def get_pci_bus(self) -> PciBus:
+        if self.has_pci_bus():
+            return self.pc.pci_bus
+        else:
+            raise Exception(
+                "Cannot execute `get_pci_bus()`: Board does not have a PCI "
+                "bus to return. Use `has_pci_bus()` to check this."
             )
 
     @overrides(AbstractSystemBoard)
@@ -315,7 +344,10 @@ class X86Board(AbstractSystemBoard, KernelDiskWorkload, SEBinaryWorkload):
     @overrides(AbstractSystemBoard)
     def get_dma_ports(self) -> Sequence[Port]:
         if self.has_dma_ports():
-            return [self.pc.south_bridge.ide.dma, self.iobus.mem_side_ports]
+            return [
+                self.pc.pci_host.up_request_port(),
+                self.iobus.mem_side_ports,
+            ]
         else:
             raise Exception(
                 "Cannot execute `get_dma_ports()`: Board does not have DMA "
@@ -377,7 +409,7 @@ class X86Board(AbstractSystemBoard, KernelDiskWorkload, SEBinaryWorkload):
         #     "earlyprintk=ttyS0",
         #     "console=ttyS0",
         #     "lpj=7999923",
-        #     "root={root_value}1",
+        #     "root={root_value}",
         #     "disk_device={disk_device}",
         # ]
         return self._new_kernel_args
