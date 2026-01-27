@@ -114,6 +114,7 @@ CPU::CPU(const BaseO3CPUParams &params)
       globalFTSeqNum(1),
       system(params.system),
       lastRunningCycle(curCycle()),
+      subtractIdleCycles(params.subtractIdleCycles),
       cpuStats(this)
 {
     fatal_if(FullSystem && params.numThreads > 1,
@@ -375,6 +376,8 @@ CPU::tick()
     assert(drainState() != DrainState::Drained);
 
     ++baseStats.numCycles;
+    // ++cpuStats.tdaCycles;
+
     updateCycleCounters(BaseCPU::CPU_STATE_ON);
 
 //    activity = false;
@@ -1351,6 +1354,10 @@ CPU::wakeCPU()
         --cycles;
         cpuStats.idleCycles += cycles;
         baseStats.numCycles += cycles;
+        if (!subtractIdleCycles) {
+            cpuStats.tdaCycles += cycles;
+        }
+        rename.addIdleCycles(cycles);
     }
 
     schedule(tickEvent, clockEdge());

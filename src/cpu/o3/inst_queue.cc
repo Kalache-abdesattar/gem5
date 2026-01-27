@@ -1026,7 +1026,7 @@ InstructionQueue::scheduleReadyInsts()
             }
 
             listOrder.erase(order_it++);
-            iqStats.issuedInstType[tid][op_class]++;
+            iqStats.statIssuedInstType[tid][op_class]++;
         } else {
             assert(idx == FUPool::NoFreeFU);
             iqStats.statFuBusy[op_class]++;
@@ -1048,6 +1048,9 @@ InstructionQueue::scheduleReadyInsts()
         DPRINTF(IQ, "Not able to schedule any instructions.\n");
     }
 
+
+    // TODO: Add the logic for multipe instruction queues
+    auto fuPool = (iqs[0]->fuPool());
     int numBusyFUs = fuPool->numBusyFUs();
 
     if (numBusyFUs == 0) {

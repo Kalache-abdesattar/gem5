@@ -560,12 +560,32 @@ class Fetch
         /** Stat for total number of predicted branches. */
         statistics::Scalar predictedBranches;
         /** Total number of cycles spent in any other state. */
+        statistics::Scalar cycles;
+        /** Stat for total number of cycles spent squashing. */
+        statistics::Scalar squashCycles;
+        /** Stat for total number of cycles spent waiting for translation */
+        statistics::Scalar tlbCycles;
+        /** Stat for total number of cycles
+         *  spent blocked due to other stages in
+         * the pipeline.
+         */
+        statistics::Scalar idleCycles;
+        /** Total number of cycles spent blocked. */
+        statistics::Scalar blockedCycles;
+        /** Total number of cycles spent in any other state. */
         statistics::Scalar miscStallCycles;
         /** Total number of cycles spent in waiting for drains. */
         statistics::Scalar pendingDrainCycles;
         /** Total number of stall cycles caused by no active threads to run. */
         statistics::Scalar noActiveThreadStallCycles;
         // /** Stat for total number of fetched cache lines. */
+        statistics::Scalar pendingTrapStallCycles;
+        /** Total number of stall cycles
+         *  caused by pending quiesce instructions. */
+        statistics::Scalar pendingQuiesceStallCycles;
+        /** Total number of stall cycles caused by I-cache wait retrys. */
+        statistics::Scalar icacheWaitRetryStallCycles;
+        /** Stat for total number of fetched cache lines. */
         statistics::Scalar cacheLines;
         /** Total number of outstanding icache accesses that were dropped
          * due to a squash.

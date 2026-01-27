@@ -199,8 +199,6 @@ Fetch::FetchStatGroup::FetchStatGroup(CPU *cpu, Fetch *fetch)
       ADD_STAT(status, statistics::units::Cycle::get(), "Fetch status cycles"),
       ADD_STAT(predictedBranches, statistics::units::Count::get(),
                "Number of branches that fetch has predicted taken"),
-      ADD_STAT(predictedBranches, statistics::units::Count::get(),
-               "Number of branches that fetch has predicted taken"),
       ADD_STAT(cycles, statistics::units::Cycle::get(),
                "Number of cycles fetch has run and was not squashing or "
                "blocked"),
@@ -262,8 +260,8 @@ Fetch::FetchStatGroup::FetchStatGroup(CPU *cpu, Fetch *fetch)
               /* last value */ fetch->fetchWidth,
               /* bucket size */ 1)
         .flags(statistics::pdf);
-    idleRate.prereq(idleRate);
-    idleRate = status[Idle] / cpu->baseStats.numCycles;
+    // idleRate.prereq(idleRate);
+    // idleRate = status[Idle] / cpu->baseStats.numCycles;
 }
 void
 Fetch::setTimeBuffer(TimeBuffer<TimeStruct> *time_buffer)
