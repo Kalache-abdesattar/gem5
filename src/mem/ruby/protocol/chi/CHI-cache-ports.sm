@@ -475,7 +475,8 @@ in_port(pfInPort, RubyRequest, prefetchQueue, rank=0) {
 
 void processNextState(Addr address, TBE tbe, CacheEntry cache_entry) {
   assert(is_valid(tbe));
-  DPRINTF(RubySlicc, "GoToNextState expected_req_resp=%d expected_snp_resp=%d snd_pendEv=%d snd_pendBytes=%d\n",
+  DPRINTF(RubySlicc, "GoToNextState expected_req_resp_msgs=%s ||  expected_req_resp=%d expected_snp_resp=%d snd_pendEv=%d snd_pendBytes=%d\n",
+                      tbe.expected_req_resp,
                       tbe.expected_req_resp.expected(),
                       tbe.expected_snp_resp.expected(),
                       tbe.snd_pendEv, tbe.snd_pendBytes.count());

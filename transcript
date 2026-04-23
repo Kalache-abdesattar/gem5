@@ -1,0 +1,7 @@
+# vsim -c -lib questa_build/work questa_top_ipc_wrap tb_gem5_cosim -do "run -all; quit -f" 
+# Start time: 19:14:00 on Apr 22,2026
+# ** Error (suppressible): (vsim-19) Failed to access library 'questa_build/work' at "questa_build/work".
+# No such file or directory. (errno = ENOENT)
+# Error loading design
+# End time: 19:14:01 on Apr 22,2026, Elapsed time: 0:00:01
+# Errors: 1, Warnings: 0

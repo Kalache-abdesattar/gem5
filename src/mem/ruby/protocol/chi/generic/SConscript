@@ -37,7 +37,9 @@
 
 Import('*')
 
-if env['CONF']['PROTOCOL'] != 'CHI':
+_chi_enabled = (env['CONF']['PROTOCOL'] == 'CHI' or
+                env['CONF'].get('RUBY_PROTOCOL_CHI', False))
+if not _chi_enabled:
     Return()
 
 SimObject('CHIGeneric.py',

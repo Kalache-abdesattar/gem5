@@ -127,6 +127,31 @@ class ExpectedMap
             else
                 return false;
         }
+
+        // Prints each registered type and its received status.
+        // Types are printed as their underlying integer value since the
+        // template parameter is an opaque enum class.
+        void
+        printTypes(std::ostream& out) const
+        {
+            out << "[";
+            bool first = true;
+            for (const auto& kv : expectedTypes) {
+                if (!first) out << ", ";
+                out << static_cast<long>(kv.first)
+                    << (kv.second ? "(rcvd)" : "(pend)");
+                first = false;
+            }
+            out << "] rcvd=" << numReceived
+                << " chunk=" << currChunk << "/" << chunks;
+        }
+
+        // Const iteration over expected types for external inspection.
+        using const_iterator =
+            typename std::unordered_map<Type, bool,
+                                        EnumClassHash>::const_iterator;
+        const_iterator begin() const { return expectedTypes.begin(); }
+        const_iterator end()   const { return expectedTypes.end();   }
     };
 
     ExpectedState<DataType> expectedData;
@@ -219,10 +244,24 @@ class ExpectedMap
         return expectedResp.receivedType(val);
     }
 
+    // Iterators over the registered resp / data types (value = received flag).
+    auto respBegin() const { return expectedResp.begin(); }
+    auto respEnd()   const { return expectedResp.end();   }
+    auto dataBegin() const { return expectedData.begin(); }
+    auto dataEnd()   const { return expectedData.end();   }
+
+    // Prints the full state: counts and per-type received status.
+    // Example output:
+    //   expected=1 received=0 resp:[12(pend)] data:[] rcvd=0 chunk=0/1
     void
     print(std::ostream& out) const
     {
-        out << expected();
+        out << "expected=" << expected()
+            << " received=" << received()
+            << " resp:";
+        expectedResp.printTypes(out);
+        out << " data:";
+        expectedData.printTypes(out);
     }
 };
 

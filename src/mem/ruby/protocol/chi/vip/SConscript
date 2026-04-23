@@ -1,0 +1,42 @@
+# -*- mode:python -*-
+# SConscript for the CHI VIP co-simulation bridge (gem5 side).
+#
+# This compiles VIPController into the gem5 CHI build.  It requires:
+#   - PROTOCOL == CHI
+#   - chi_ipc headers from chi_vip/ipc/ (supplied via CPPPATH below if
+#     the BUILD_VIP option is set; otherwise the file is silently skipped)
+#
+# To enable, pass to scons:
+#   BUILD_VIP=1  CHI_VIP_IPC_PATH=/path/to/chi_vip/ipc
+
+Import('*')
+
+# With USE_MULTIPLE_PROTOCOLS=True the default PROTOCOL may not be 'CHI', but
+# CHI is still compiled in.  Check either the default or the CHI-specific flag.
+_chi_enabled = (env['CONF']['PROTOCOL'] == 'CHI' or
+                env['CONF'].get('RUBY_PROTOCOL_CHI', False))
+if not _chi_enabled:
+    Return()
+
+if not env['CONF'].get('BUILD_VIP', False):
+    if not GetOption('silent'):
+        print("BUILD_VIP not set, skipping CHI VIP co-simulation bridge\n")
+    Return()
+
+ipc_path = env['CONF'].get('CHI_VIP_IPC_PATH', '')
+if not ipc_path:
+    print("Warning: BUILD_VIP=1 but CHI_VIP_IPC_PATH not set; "
+          "VIPController will not find chi_ipc.hh\n")
+else:
+    env.Append(CPPPATH=[ipc_path])
+    # chi_ipc.cc lives in chi_vip/ipc/; compile it into this build.
+    Source(ipc_path + '/chi_ipc.cc')
+
+# POSIX shared memory requires -lrt on Linux.
+env.Append(LIBS=['rt'])
+
+SimObject('VIPController.py', sim_objects=['VIPController'])
+Source('VIPController.cc')
+DebugFlag('RubyCHIVIP')
+
+print("BUILD_VIP set: building CHI VIP co-simulation bridge\n")

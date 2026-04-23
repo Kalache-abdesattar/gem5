@@ -78,6 +78,11 @@ CompoundFlag('ExecAll', [ 'ExecEnable', 'ExecCPSeq', 'ExecEffAddr',
 CompoundFlag('Exec', [ 'ExecEnable', 'ExecOpClass', 'ExecThread',
     'ExecEffAddr', 'ExecResult', 'ExecSymbol', 'ExecMicro', 'ExecMacro',
     'ExecFaulting', 'ExecUser', 'ExecKernel' ])
+
+CompoundFlag('CustomFlags', [ 'ExecEnable', 'ExecOpClass', 'ExecThread',
+    'ExecEffAddr', 'ExecResult', 'ExecSymbol', 'ExecMicro', 'ExecMacro',
+    'ExecFaulting', 'ExecUser', 'ExecKernel', 'RubySlicc' ])
+
 CompoundFlag('ExecNoTicks', [ 'Exec', 'FmtTicksOff' ])
 
 Source('func_unit.cc')

@@ -1422,7 +1422,9 @@ transition(BUSY_BLKD, CheckUpgrade_FromRU) {
 // Generic send/receive transitions
 
 // waiting for data
-transition(BUSY_BLKD,
+// BUSY_INTR is included because Initiate_MaintainCoherence may queue
+// SendWriteNoSnp (BUSY_BLKD→BUSY_INTR) before CBWrData arrives.
+transition({BUSY_BLKD,BUSY_INTR},
            {CBWrData_I,CBWrData_SC,CBWrData_SD_PD,CBWrData_UC,CBWrData_UD_PD}) {
   Receive_ReqDataResp;
   UpdateDirState_FromReqDataResp;

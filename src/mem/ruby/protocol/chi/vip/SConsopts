@@ -1,0 +1,34 @@
+# -*- mode:python -*-
+# SConsopts for the CHI VIP co-simulation bridge.
+#
+# Enable with either:
+#   scons ... CHI_VIP_IPC_PATH=/path/to/chi_vip/ipc
+#   CHI_VIP_IPC_PATH=/path/to/chi_vip/ipc scons ...
+
+Import('*')
+
+import os
+
+vip_vars = Variables()
+vip_vars.AddVariables(
+    PathVariable('CHI_VIP_IPC_PATH',
+                 "Path to chi_vip/ipc/ directory (enables VIPController build)",
+                 '', PathVariable.PathAccept),
+)
+vip_vars.Update(main)
+
+main["CONF"]["BUILD_VIP"] = False
+main["CONF"]["CHI_VIP_IPC_PATH"] = ''
+
+# Check environment variable first
+ipc_ev = os.environ.get("CHI_VIP_IPC_PATH", None)
+if ipc_ev:
+    print(f"CHI_VIP_IPC_PATH from environment: {ipc_ev}")
+    main["CONF"]["CHI_VIP_IPC_PATH"] = ipc_ev
+    main["CONF"]["BUILD_VIP"] = True
+
+# SCons command-line overrides environment
+if "CHI_VIP_IPC_PATH" in main and main["CHI_VIP_IPC_PATH"]:
+    print(f"CHI_VIP_IPC_PATH from command line: {main['CHI_VIP_IPC_PATH']}")
+    main["CONF"]["CHI_VIP_IPC_PATH"] = str(main["CHI_VIP_IPC_PATH"])
+    main["CONF"]["BUILD_VIP"] = True

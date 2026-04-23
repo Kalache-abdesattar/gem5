@@ -125,9 +125,11 @@ def create_system(
     rnf_cb = getattr(system, "_rnf_gen", CHI_RNF.generate)
 
     # Generate the Request Nodes
-    ruby_system.rnf = rnf_cb(options, ruby_system, cpus)
+    _rnf_list = rnf_cb(options, ruby_system, cpus)
+    if _rnf_list:
+        ruby_system.rnf = _rnf_list
 
-    for rnf in ruby_system.rnf:
+    for rnf in _rnf_list:
         cpu_sequencers.extend(rnf.getSequencers())
         all_cntrls.extend(rnf.getAllControllers())
         network_nodes.append(rnf)
@@ -218,7 +220,7 @@ def create_system(
         all_cntrls.extend(ruby_system.io_rni.getAllControllers())
 
     # Assign downstream destinations
-    for rnf in ruby_system.rnf:
+    for rnf in _rnf_list:
         rnf.setDownstream(hnf_dests)
     if len(dma_ports) > 0:
         for rni in ruby_system.dma_rni:
@@ -227,6 +229,45 @@ def create_system(
         ruby_system.io_rni.setDownstream(hnf_dests)
     for hnf in ruby_system.hnf:
         hnf.setDownstream(mem_dests)
+
+    # VIP hook: if system._vip_shm_names is set, instantiate VIPController
+    # nodes as additional RN-F proxies for Questa co-simulation.
+    # Example: system._vip_shm_names = ["/chi_vip_0"]
+    # Results stored as system._vip_nodes (plain Python list, not a param).
+    system._vip_nodes = []
+    vip_shm_names = getattr(system, '_vip_shm_names', [])
+    if vip_shm_names:
+        try:
+            import sys as _sys
+            import os as _os
+            # Allow importing from the co-simulation config tree
+            _cfg_root = _os.path.abspath(
+                _os.path.join(_os.path.dirname(__file__), '../../..'))
+            if _cfg_root not in _sys.path:
+                _sys.path.insert(0, _cfg_root)
+            from config.chi.nodes.vip_requestor import VIPRequestorCoSim
+            for shm_name in vip_shm_names:
+                vip = VIPRequestorCoSim(
+                    network=ruby_system.network,
+                    cache_line_size=system.cache_line_size.value,
+                    ruby_system=ruby_system,
+                    shm_name=shm_name,
+                )
+                vip.downstream_destinations = hnf_dests
+                network_cntrls.append(vip)
+                all_cntrls.append(vip)
+                system._vip_nodes.append(vip)
+                print(f"[CHI] VIPController added: version={vip.version}"
+                      f" shm='{shm_name}'")
+        except Exception as e:
+            import traceback
+            print(f"[CHI] Warning: VIPController not available: {e}")
+            traceback.print_exc()
+
+    # Attach VIP nodes to system so they are in the SimObject hierarchy.
+    # Use a numbered attribute for each so gem5 can resolve Parent proxies.
+    for i, vip in enumerate(system._vip_nodes):
+        setattr(system, f"vip_ctrl_{i}", vip)
 
     # Setup data message size for all controllers
     for cntrl in all_cntrls:
