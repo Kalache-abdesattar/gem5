@@ -335,18 +335,25 @@ class CHI_HNFController(Base_CHI_Cache_Controller):
         self.addr_ranges = addr_ranges
         self.allow_SD = True
         self.is_HN = True
-        self.enable_DMT = True
-        self.enable_DCT = True
+        # DMT/DCT disabled: with DMT enabled, needCacheEntry() returns false for
+        # all cold-start reads (ReadShared, ReadUnique, ...) when dir_entry is
+        # invalid, so the HNF always lands in RU (exclusive, no cache copy).
+        # That prevents SC_RSC/RSC states needed for Evict and MakeReadUnique.
+        # With DMT off, ReadShared → SC_RSC and ReadUnique → UC_RU as expected.
+        self.enable_DMT = False
+        self.enable_DCT = False
         self.send_evictions = False
-        # MOESI / Mostly inclusive for shared / Exclusive for unique
+        # Strictly inclusive: HNF keeps a copy for all request types,
+        # including ReadUnique.  dealloc_on_unique=False prevents eviction
+        # of the HNF copy when granting exclusive ownership to a requester.
         self.alloc_on_seq_acc = False
         self.alloc_on_seq_line_write = False
         self.alloc_on_readshared = True
-        self.alloc_on_readunique = False
+        self.alloc_on_readunique = True
         self.alloc_on_readonce = True
         self.alloc_on_writeback = True
         self.alloc_on_atomic = True
-        self.dealloc_on_unique = True
+        self.dealloc_on_unique = False
         self.dealloc_on_shared = False
         self.dealloc_backinv_unique = False
         self.dealloc_backinv_shared = False

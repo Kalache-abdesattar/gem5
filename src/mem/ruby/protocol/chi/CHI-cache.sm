@@ -316,6 +316,7 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     CleanUnique,                 desc="", in_trans="yes";
     MakeReadUnique,              desc="", in_trans="yes";
     Evict,                       desc="", in_trans="yes";
+    WriteBackPtl,                desc="", in_trans="yes";
     WriteBackFull,               desc="", in_trans="yes";
     WriteEvictFull,              desc="", in_trans="yes";
     WriteCleanFull,              desc="", in_trans="yes";
@@ -420,6 +421,7 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     // changes the state of the data while the request was pending.
     // Actual CHI implementations don't have this check.
     Evict_Stale,            desc="", in_trans="yes";
+    WriteBackPtl_Stale,     desc="", in_trans="yes";
     WriteBackFull_Stale,    desc="", in_trans="yes";
     WriteEvictFull_Stale,   desc="", in_trans="yes";
     WriteCleanFull_Stale,   desc="", in_trans="yes";

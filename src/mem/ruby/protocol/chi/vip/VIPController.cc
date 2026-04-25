@@ -549,6 +549,7 @@ VIPController::sccToGem5Req(uint8_t op)
     case 0x11: return CHIRequestType_CleanUnique;
     case 0x15: return CHIRequestType_MakeReadUnique;
     case 0x17: return CHIRequestType_Evict;
+    case 0x1A: return CHIRequestType_WriteBackPtl;
     case 0x1B: return CHIRequestType_WriteBackFull;
     case 0x1C: return CHIRequestType_WriteCleanFull;
     case 0x1D: return CHIRequestType_WriteEvictFull;

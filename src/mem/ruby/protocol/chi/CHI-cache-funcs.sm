@@ -1257,6 +1257,8 @@ Event reqToEvent(CHIRequestType type, bool is_prefetch) {
       return Event:MakeReadUnique;
   } else if (type == CHIRequestType:Evict) {
     return Event:Evict;
+  } else if (type == CHIRequestType:WriteBackPtl) {
+    return Event:WriteBackPtl;
   } else if (type == CHIRequestType:WriteBackFull) {
     return Event:WriteBackFull;
   } else if (type == CHIRequestType:WriteEvictFull) {

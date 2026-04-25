@@ -63,6 +63,7 @@ enumeration(CHIRequestType, desc="") {
 
   Evict;
 
+  WriteBackPtl;
   WriteBackFull;
   WriteCleanFull;
   WriteEvictFull;

@@ -1285,9 +1285,16 @@ action(Initiate_AtomicNoReturn_Miss, desc="") {
 
 action(Initiate_CopyBack, desc="") {
   // expect to receive this data after Send_CompDBIDResp
-  if (tbe.reqType == CHIRequestType:WriteBackFull) {
+  if ((tbe.reqType == CHIRequestType:WriteBackFull) ||
+      (tbe.reqType == CHIRequestType:WriteBackPtl)) {
     tbe.expected_req_resp.addExpectedDataType(CHIDataType:CBWrData_UD_PD);
     tbe.expected_req_resp.addExpectedDataType(CHIDataType:CBWrData_SD_PD);
+    // For WriteBackPtl: pre-load existing cache data so CBWrData_UD_PD
+    // dirty bytes merge on top to form a complete line (avoiding partial
+    // data assertions later in Finalize_UpdateCacheFromTBE).
+    if ((tbe.reqType == CHIRequestType:WriteBackPtl) && is_valid(cache_entry)) {
+      tbe.dataBlk := cache_entry.DataBlk;
+    }
   } else if (tbe.reqType == CHIRequestType:WriteEvictFull) {
     assert(tbe.reqType == CHIRequestType:WriteEvictFull);
     tbe.expected_req_resp.addExpectedDataType(CHIDataType:CBWrData_UC);
@@ -2264,7 +2271,11 @@ action(UpdateDirState_FromReqDataResp, desc="") {
   assert(is_valid(tbe));
   // only perform the update once we received all chunks
   if (tbe.expected_req_resp.hasReceivedData()) {
-    assert(tbe.dataBlkValid.isFull());
+    // WriteBackPtl carries partial dirty bytes; dataBlkValid is not yet full
+    // (it gets filled in UpdateDataState_FromReqDataResp after the overlay merge).
+    if (tbe.reqType != CHIRequestType:WriteBackPtl) {
+      assert(tbe.dataBlkValid.isFull());
+    }
     peek(datInPort, CHIDataMsg) {
 
       if (in_msg.type == CHIDataType:CBWrData_UC) {
@@ -2394,7 +2405,9 @@ action(UpdateDataState_FromReqDataResp, desc="") {
   assert(is_valid(tbe));
   // only perform the update once we received all chunks
   if (tbe.expected_req_resp.hasReceivedData()) {
-    assert(tbe.dataBlkValid.isFull());
+    if (tbe.reqType != CHIRequestType:WriteBackPtl) {
+      assert(tbe.dataBlkValid.isFull());
+    }
     peek(datInPort, CHIDataMsg) {
 
       if ((in_msg.type == CHIDataType:CompData_UC) ||
@@ -2454,6 +2467,12 @@ action(UpdateDataState_FromReqDataResp, desc="") {
           tbe.dataMaybeDirtyUpstream := true;
         } else {
           tbe.dataMaybeDirtyUpstream := false;
+          if (tbe.reqType == CHIRequestType:WriteBackPtl) {
+            // Dirty bytes from CBWrData_UD_PD have been overlaid on the
+            // pre-loaded cache data (see Initiate_CopyBack).  Mark the
+            // block complete so downstream assertions and CheckCacheFill pass.
+            tbe.dataBlkValid.fillMask();
+          }
         }
 
       } else if (in_msg.type == CHIDataType:CBWrData_SD_PD) {
