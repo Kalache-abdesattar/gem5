@@ -17,6 +17,7 @@
 #include <cstring>
 
 #include "base/logging.hh"
+#include "sim/sim_exit.hh"
 #include "debug/RubyCHIGeneric.hh"
 #include "mem/ruby/protocol/CHI/CHIDataMsg.hh"
 #include "mem/ruby/protocol/CHI/CHIRequestMsg.hh"
@@ -64,23 +65,11 @@ VIPController::wakeup()
     Tick ct = curTick();
     Tick lat1 = cyclesToTicks(Cycles(1));  // minimum non-zero latency
 
-    // Drain q2g_req → reqOut
-    {
-        chi_ipc::ChiIpcReq ipc;
-        while (shm->q2g_req.pop(ipc)) {
-            auto msg = makeReqMsg(ipc);
-            if (reqOut->areNSlotsAvailable(1, ct)) {
-                reqOut->enqueue(msg, ct, lat1, false, false);
-            } else {
-                DPRINTF(RubyCHIGeneric,
-                        "VIPController: reqOut full, dropped REQ txn=%u\n",
-                        ipc.txn_id);
-            }
-            pending = true;
-        }
-    }
-
-    // Drain q2g_rsp → rspOut
+    // Drain q2g_rsp FIRST → rspOut
+    // Must precede q2g_req: CompAck uses txnid_to_addr_ to recover the HNF
+    // TBE address.  If q2g_req is drained first, a new request with the same
+    // txnid overwrites txnid_to_addr_ before the CompAck can be routed to the
+    // correct TBE, causing an Invalid Transition panic in the HNF.
     {
         chi_ipc::ChiIpcRsp ipc;
         while (shm->q2g_rsp.pop(ipc)) {
@@ -91,6 +80,23 @@ VIPController::wakeup()
         }
     }
 
+    // Drain q2g_req → pendingReqs_ (never drop; always buffer)
+    {
+        chi_ipc::ChiIpcReq ipc;
+        while (shm->q2g_req.pop(ipc)) {
+            if (ipc.opcode == 0) continue;  // ReqLCrdReturn, not a transaction
+            pendingReqs_.push(makeReqMsg(ipc));
+            pending = true;
+        }
+    }
+    // Flush pendingReqs_ → reqOut up to available slots
+    while (!pendingReqs_.empty() && reqOut->areNSlotsAvailable(1, ct)) {
+        reqOut->enqueue(pendingReqs_.front(), ct, lat1, false, false);
+        pendingReqs_.pop();
+        pending = true;
+    }
+    if (!pendingReqs_.empty()) pending = true;  // wake up again to drain remainder
+
     // Drain q2g_dat → datOut.
     // Each IPC DAT carries a full cache line (CHI_DATA_W_BYTES = dataChannelSize
     // when both sides use the same channel width). dataMsgsPerLine gives the
@@ -98,6 +104,26 @@ VIPController::wakeup()
     {
         chi_ipc::ChiIpcDat ipc;
         while (shm->q2g_dat.pop(ipc)) {
+            // Check for tohost write: CVA6 test writes 1=PASS or FAIL code
+            // to 0x80040000 to signal test completion.
+            {
+                auto it = txnid_to_addr_.find(ipc.txn_id);
+                Addr waddr = (it != txnid_to_addr_.end())
+                             ? it->second
+                             : static_cast<Addr>(ipc.addr);
+                if (waddr == 0x80040000ULL) {
+                    uint64_t tohost_val = 0;
+                    std::memcpy(&tohost_val, ipc.data, sizeof(tohost_val));
+                    if (tohost_val == 1ULL) {
+                        fprintf(stderr, "[VIP] tohost=1 — PASS\n");
+                        exitSimLoop("tohost: PASS", 0);
+                    } else if (tohost_val != 0) {
+                        fprintf(stderr, "[VIP] tohost=0x%016lx — FAIL\n",
+                                (unsigned long)tohost_val);
+                        exitSimLoop("tohost: FAIL", 1);
+                    }
+                }
+            }
             for (int beat = 0; beat < dataMsgsPerLine; beat++) {
                 auto msg = makeDatMsg(ipc, beat, dataChannelSize);
                 if (datOut->areNSlotsAvailable(1, ct))
@@ -172,8 +198,13 @@ VIPController::recvResponseMsg(const CHIResponseMsg* msg)
     if (!shm) return true;
 
     auto ipc = packRsp(msg);
+    fprintf(stderr, "[VIP] recvResponseMsg type=%d txnId=%lu dbid=%lu → ipc op=0x%02x txn=0x%03x\n",
+            (int)msg->gettype(), (unsigned long)msg->gettxnId(),
+            (unsigned long)msg->getdbid(),
+            (unsigned)ipc.opcode, (unsigned)ipc.txn_id);
     if (!shm->g2q_rsp.push(ipc)) {
-        DPRINTF(RubyCHIGeneric, "VIPController: g2q_rsp full\n");
+        fprintf(stderr, "[VIP] recvResponseMsg: g2q_rsp FULL — retry op=0x%02x txn=0x%03x\n",
+                (unsigned)ipc.opcode, (unsigned)ipc.txn_id);
         return false;  // retry next cycle
     }
     return true;
@@ -185,10 +216,18 @@ VIPController::recvDataMsg(const CHIDataMsg* msg)
     auto* shm = shm_.layout();
     if (!shm) return true;
 
-    // The HN-F splits each cache-line read response into dataMsgsPerLine
-    // CHIDataMsgs of dataChannelSize bytes each.  Pack each one as a
-    // separate IPC DAT so Questa sees one flit per beat.
-    auto ipc = packDat(msg, dataChannelSize);
+    // The testbench's dat_rx_sm expects ONE IPC flit per cache line (with the
+    // full 64 bytes) and splits it into two 32-byte RTL flits (DataID=00 and
+    // DataID=10).  gem5 calls recvDataMsg once per beat; pack a full-cacheline
+    // IPC flit on the first beat (offset==0) and silently drop subsequent beats
+    // (their data is already present in beat 0's DataBlock).
+    const WriteMask& bm = msg->getbitMask();
+    int first_set = bm.firstBitSet(true);
+    int offset = (first_set >= cacheLineSz_) ? 0 : first_set;
+    if (offset != 0)
+        return true;  // non-first beat: data already sent in the combined flit
+
+    auto ipc = packDat(msg, cacheLineSz_);
     if (!shm->g2q_dat.push(ipc)) {
         DPRINTF(RubyCHIGeneric, "VIPController: g2q_dat full\n");
         return false;
@@ -228,25 +267,39 @@ VIPController::makeReqMsg(const chi_ipc::ChiIpcReq& m)
     Tick t = curTick();
     auto msg = std::make_shared<CHIRequestMsg>(t, cacheLineSz_, m_ruby_system);
     Addr addr = static_cast<Addr>(m.addr);
-    msg->setaddr(addr);
-    msg->setaccAddr(addr);       // accAddr must be >= addr; for full-line ops addr==addr
-    msg->setaccSize(cacheLineSz_); // full cache line access
+    Addr lineAddr = addr & ~(Addr)(cacheLineSz_ - 1);
+    fprintf(stderr, "[VIP] makeReqMsg op=0x%02x txn=0x%03x addr=0x%lx lineAddr=0x%lx src=%u\n",
+            (unsigned)m.opcode, (unsigned)m.txn_id,
+            (unsigned long)addr, (unsigned long)lineAddr, (unsigned)m.src_id);
+    msg->setaddr(lineAddr);
+    msg->setaccAddr(addr);
+    msg->setaccSize(cacheLineSz_);
     msg->settype(sccToGem5Req(m.opcode));
+    if (m.opcode >= 0x28 && m.opcode <= 0x39)
+        msg->setchiAtomicSubOp(static_cast<int>(m.opcode));
     msg->settxnId(static_cast<Addr>(m.txn_id));
     msg->setusesTxnId(false);  // HN-F requires usesTxnId=false for incoming REQs
     msg->setns(static_cast<bool>(m.ns));
-    msg->setallowRetry(static_cast<bool>(m.allow_retry));
+    msg->setallowRetry(true);  // VIPController never manages PCrd credits; always use AllocRequest path
 
     // Track txnId→addr so makeDatMsg can set the correct address on
     // write-data messages (NCBWrData DAT flits carry no address field).
-    txnid_to_addr_[m.txn_id] = addr;
+    txnid_to_addr_[m.txn_id] = lineAddr;
+
+    // Track txnId→RTL SRCID so packDat/packRsp can set tgt_id to the actual
+    // CHI node ID in the RTL rather than gem5's internal MachineID.num.
+    txnid_to_rtl_src_[m.txn_id] = static_cast<uint16_t>(m.src_id);
+
+    // Track txnId→original byte address for CCID computation in packDat.
+    // gem5 SLICC always emits CCID=0 in CHIDataMsg; we reconstruct the correct
+    // CCID from the request address (bits[5:4] = 16-byte chunk within 64B line).
+    txnid_to_acc_addr_[m.txn_id] = addr;
 
     // Always identify as this VIPController so responses route back here.
     msg->setrequestor(m_machineID);
     // Route to the HN-F responsible for the request address.
     // CHI gem5 uses MachineType_Cache for both RNF and HNF controllers.
-    MachineID tgt = mapAddressToDownstreamMachine(
-        static_cast<Addr>(m.addr), MachineType_Cache);
+    MachineID tgt = mapAddressToDownstreamMachine(lineAddr, MachineType_Cache);
     msg->getDestination().add(tgt);
     return msg;
 }
@@ -254,22 +307,39 @@ VIPController::makeReqMsg(const chi_ipc::ChiIpcReq& m)
 CHIGenericController::CHIResponseMsgPtr
 VIPController::makeRspMsg(const chi_ipc::ChiIpcRsp& m)
 {
+    fprintf(stderr, "[VIP] makeRspMsg op=0x%02x txn=0x%03x resp=0x%02x tgt=%u src=%u\n",
+            (unsigned)m.opcode, (unsigned)m.txn_id, (unsigned)m.resp,
+            (unsigned)m.tgt_id, (unsigned)m.src_id);
     Tick t = curTick();
     auto msg = std::make_shared<CHIResponseMsg>(t, cacheLineSz_, m_ruby_system);
     msg->settxnId(static_cast<Addr>(m.txn_id));
     msg->setusesTxnId(true);
 
-    using R    = CHIResponseType;
     using Resp = uint8_t;
     switch (static_cast<Resp>(m.opcode)) {
-    // These literal integers are the chi::rsp_optype_e values produced by
-    // scc.  They match the IHI0050 spec and the chi_flit_pack.hh OPCODE fields.
-    case 0x04:
-        msg->settype(CHIResponseType_CompAck);
-        // m.txn_id is the DBID echoed from packDat (= original request txn_id).
-        // Recover the address so the HN-F can route CompAck to the right TBE.
-        // usesTxnId must be false: if true, the Cache_Controller dispatches by
-        // txnId (0x70) instead of addr (0x30000) and hits state I → panic.
+    // RTL CHI-B (IHI0050B) opcode values from chie_defines.v
+    case 0x01: // SnpResp
+        msg->settype(m.resp == 1 ? CHIResponseType_SnpResp_SC
+                                 : CHIResponseType_SnpResp_I);
+        // HN-F dispatches SnpResp by cache-line address (req TBE), not txnId.
+        // usesTxnId=true (default above) would route by txnId interpreted as
+        // an address → no TBE at that address → state I → panic.
+        msg->setusesTxnId(false);
+        {
+            auto it = txnid_to_addr_.find(m.txn_id);
+            if (it != txnid_to_addr_.end()) {
+                msg->setaddr(it->second);
+                fprintf(stderr, "[VIP] SnpResp txn=0x%03x resp=0x%02x → addr=0x%lx\n",
+                        (unsigned)m.txn_id, (unsigned)m.resp,
+                        (unsigned long)it->second);
+            } else {
+                fprintf(stderr, "[VIP] SnpResp txn=0x%03x → NO ADDR in txnid_to_addr_ (size=%zu)\n",
+                        (unsigned)m.txn_id, txnid_to_addr_.size());
+            }
+        }
+        break;
+    case 0x09: // SnpRespFwded — same routing fix as SnpResp
+        msg->settype(CHIResponseType_SnpResp_I);
         msg->setusesTxnId(false);
         {
             auto it = txnid_to_addr_.find(m.txn_id);
@@ -277,7 +347,27 @@ VIPController::makeRspMsg(const chi_ipc::ChiIpcRsp& m)
                 msg->setaddr(it->second);
         }
         break;
-    case 0x1:  // Comp
+    case 0x02: // CompAck
+        msg->settype(CHIResponseType_CompAck);
+        // Recover address so the HN-F routes CompAck to the right TBE.
+        // usesTxnId must be false: if true the Cache_Controller dispatches by
+        // txnId (=0x01) as address → hits state I → panic.
+        msg->setusesTxnId(false);
+        {
+            auto it = txnid_to_addr_.find(m.txn_id);
+            if (it != txnid_to_addr_.end()) {
+                msg->setaddr(it->second);
+                fprintf(stderr, "[VIP] CompAck txn=0x%03x → addr=0x%lx\n",
+                        (unsigned)m.txn_id, (unsigned long)it->second);
+            } else {
+                fprintf(stderr, "[VIP] CompAck txn=0x%03x → NO ADDR in txnid_to_addr_ (size=%zu)\n",
+                        (unsigned)m.txn_id, txnid_to_addr_.size());
+            }
+        }
+        break;
+    case 0x03: // RetryAck
+        msg->settype(CHIResponseType_RetryAck); break;
+    case 0x04: // Comp
         switch (m.resp) {
         case 0: msg->settype(CHIResponseType_Comp_I);     break;
         case 1: msg->settype(CHIResponseType_Comp_SC);    break;
@@ -286,18 +376,16 @@ VIPController::makeRspMsg(const chi_ipc::ChiIpcRsp& m)
         default:msg->settype(CHIResponseType_Comp);       break;
         }
         break;
-    case 0x5:  // DBIDResp
-        msg->settype(CHIResponseType_DBIDResp); break;
-    case 0x7:  // CompDBIDResp
+    case 0x05: // CompDBIDResp
         msg->settype(CHIResponseType_CompDBIDResp); break;
-    case 0x08: msg->settype(CHIResponseType_ReadReceipt);  break;
-    case 0x09: msg->settype(CHIResponseType_RespSepData);  break;
-    case 0x0B: msg->settype(CHIResponseType_RetryAck);     break;
-    case 0x0C: msg->settype(CHIResponseType_PCrdGrant);    break;
-    case 0x13: // SnpResp
-        msg->settype(m.resp == 1 ? CHIResponseType_SnpResp_SC
-                                 : CHIResponseType_SnpResp_I);
-        break;
+    case 0x06: // DBIDResp
+        msg->settype(CHIResponseType_DBIDResp); break;
+    case 0x07: // PCrdGrant
+        msg->settype(CHIResponseType_PCrdGrant); break;
+    case 0x08: // ReadReceipt
+        msg->settype(CHIResponseType_ReadReceipt); break;
+    case 0x0B: // RespSepData
+        msg->settype(CHIResponseType_RespSepData); break;
     default:
         msg->settype(CHIResponseType_Comp); break;
     }
@@ -326,11 +414,36 @@ VIPController::makeDatMsg(const chi_ipc::ChiIpcDat& m, int beat, int beatSz)
     msg->settxnId(static_cast<Addr>(m.txn_id));
     msg->setusesTxnId(false);  // datInPort asserts !usesTxnId; routes by addr
 
-    // Map dat opcode + resp to gem5 CHIDataType
+    // Map dat opcode + resp to gem5 CHIDataType.
+    // RTL CHI-B (IHI0050B) opcode values from chie_defines.v.
     uint8_t op   = m.opcode;
     uint8_t resp = m.resp;
-    // chi::dat_optype_e integer values from IHI0050 / scc header
     switch (op) {
+    case 0x1: // SnpRespData
+        switch (resp) {
+        case 1: msg->settype(CHIDataType_SnpRespData_SC);   break;
+        case 2: msg->settype(CHIDataType_SnpRespData_UC);   break;
+        case 3: msg->settype(CHIDataType_SnpRespData_SD);   break;
+        case 4: msg->settype(CHIDataType_SnpRespData_I_PD); break;
+        case 5: msg->settype(CHIDataType_SnpRespData_SC_PD);break;
+        case 6: msg->settype(CHIDataType_SnpRespData_SD);   break;
+        default:msg->settype(CHIDataType_SnpRespData_I);    break;
+        }
+        break;
+    case 0x2: // CopyBackWrData (CHI-B 0x2; was NonCopyBackWrData in CHI-E)
+        // CHI-B RESP encoding: 000=I, 001=SC, 010=UC, 110=UD_PD, 111=SD_PD
+        switch (resp) {
+        case 0: msg->settype(CHIDataType_CBWrData_I);     break;
+        case 1: msg->settype(CHIDataType_CBWrData_SC);    break;
+        case 2: msg->settype(CHIDataType_CBWrData_UC);    break;
+        case 6: msg->settype(CHIDataType_CBWrData_UD_PD); break;
+        case 7: msg->settype(CHIDataType_CBWrData_SD_PD); break;
+        default:msg->settype(CHIDataType_CBWrData_UC);    break;
+        }
+        break;
+    case 0x3: // NonCopyBackWrData (CHI-B 0x3; was DataSepResp in CHI-E)
+    case 0xC: // NCBWrDataCompAck
+        msg->settype(CHIDataType_NCBWrData); break;
     case 0x4: // CompData
         switch (resp) {
         case 0: msg->settype(CHIDataType_CompData_I);     break;
@@ -341,32 +454,17 @@ VIPController::makeDatMsg(const chi_ipc::ChiIpcDat& m, int beat, int beatSz)
         default:msg->settype(CHIDataType_CompData_I);     break;
         }
         break;
-    case 0x3: // DataSepResp
-        msg->settype(CHIDataType_DataSepResp_UC); break;
-    case 0x5: // CopyBackWrData
+    case 0x5: // SnpRespDataPtl — no exact gem5 type; map to SnpRespData_I
         switch (resp) {
-        case 1: msg->settype(CHIDataType_CBWrData_SC);    break;
-        case 5: msg->settype(CHIDataType_CBWrData_UD_PD); break;
-        case 7: msg->settype(CHIDataType_CBWrData_SD_PD); break;
-        case 0: msg->settype(CHIDataType_CBWrData_I);     break;
-        default:msg->settype(CHIDataType_CBWrData_UC);    break;
-        }
-        break;
-    case 0x2: // NonCopyBackWrData
-    case 0xC: // NCBWrDataCompAck
-        msg->settype(CHIDataType_NCBWrData); break;
-    case 0x1: // SnpRespData
-        switch (resp) {
-        case 1: msg->settype(CHIDataType_SnpRespData_SC);   break;
-        case 2: msg->settype(CHIDataType_SnpRespData_UC);   break;
-        case 4: msg->settype(CHIDataType_SnpRespData_I_PD); break;
-        case 5: msg->settype(CHIDataType_SnpRespData_SC_PD);break;
-        case 6: msg->settype(CHIDataType_SnpRespData_SD);   break;
-        default:msg->settype(CHIDataType_SnpRespData_I);    break;
+        case 4: msg->settype(CHIDataType_SnpRespData_I_PD);     break;
+        case 2: msg->settype(CHIDataType_SnpRespData_UD);     break;
+        default:msg->settype(CHIDataType_SnpRespData_I);     break;
         }
         break;
     case 0x6: // SnpRespDataFwded
         msg->settype(CHIDataType_SnpRespData_I_Fwded_SC); break;
+    case 0xB: // DataSepResp (CHI-B 0xB; was 0x3 in CHI-E)
+        msg->settype(CHIDataType_DataSepResp_UC); break;
     default:
         msg->settype(CHIDataType_NCBWrData); break;
     }
@@ -377,8 +475,9 @@ VIPController::makeDatMsg(const chi_ipc::ChiIpcDat& m, int beat, int beatSz)
     int n = std::min(beatSz, cacheLineSz_ - offset);
     if (n > 0) {
         msg->getdataBlk().setData(m.data + offset, offset, n);
-        fprintf(stderr, "[VIP] makeDatMsg txn=0x%02x addr=0x%lx beat=%d "
+        fprintf(stderr, "[VIP] makeDatMsg opcode=0x%02x resp=0x%02x txn=0x%03x addr=0x%lx beat=%d "
                 "offset=%d data[off]=0x%02x data[off+1]=0x%02x\n",
+                m.opcode, m.resp,
                 m.txn_id, static_cast<unsigned long>(addr), beat, offset,
                 m.data[offset], (n > 1 ? m.data[offset + 1] : 0));
     }
@@ -388,12 +487,30 @@ VIPController::makeDatMsg(const chi_ipc::ChiIpcDat& m, int beat, int beatSz)
     {
         WriteMask mask(cacheLineSz_);
         bool any = false;
-        for (int i = offset; i < offset + n; i++) {
-            if (m.be[i]) { mask.setMask(i, 1); any = true; }
+        if (m.opcode == 0x05 && n > 0) {
+            // SnpRespDataPtl: BE=1 marks dirty sublines; BE=0 bytes arrived
+            // as zeros from the RTL (clean sublines the RTL discarded).
+            // Restore clean bytes from the last CompData we sent for this
+            // address so gem5 receives a complete, correct cache line.
+            auto it = addr_to_line_data_.find(addr);
+            if (it != addr_to_line_data_.end() &&
+                    (int)it->second.size() >= cacheLineSz_) {
+                for (int i = offset; i < offset + n; i++) {
+                    if (!m.be[i]) {
+                        // Replace RTL's zero with the cached clean byte.
+                        msg->getdataBlk().setData(&it->second[i], i, 1);
+                    }
+                }
+            }
+            mask.setMask(offset, n);  // full beat valid after merge
+        } else {
+            for (int i = offset; i < offset + n; i++) {
+                if (m.be[i]) { mask.setMask(i, 1); any = true; }
+            }
+            if (!any) mask.setMask(offset, n);  // no BE info — treat beat as fully valid
         }
-        if (!any) mask.setMask(offset, n);  // no BE info — treat beat as fully valid
         msg->setbitMask(mask);
-        fprintf(stderr, "[VIP] makeDatMsg txn=0x%02x beat=%d bitMask.count=%d\n",
+        fprintf(stderr, "[VIP] makeDatMsg txn=0x%03x beat=%d bitMask.count=%d\n",
                 m.txn_id, beat, mask.count());
     }
     msg->setresponder(m_machineID);
@@ -411,43 +528,53 @@ chi_ipc::ChiIpcRsp
 VIPController::packRsp(const CHIResponseMsg* msg)
 {
     chi_ipc::ChiIpcRsp m{};
-    m.txn_id  = static_cast<uint8_t>(msg->gettxnId());
-    m.src_id  = static_cast<uint16_t>(msg->getresponder().num);
-    m.tgt_id  = static_cast<uint16_t>(msg->getDestination().smallestElement().num);
     m.db_id   = static_cast<uint16_t>(msg->getdbid());
+    // gem5 HN-F leaves txnId=0 in DBIDResp/CompDBIDResp (not needed for
+    // internal SLICC routing); recover it from dbid which equals tbe.txnId =
+    // original REQ TxnID.  All other response types set txnId normally.
+    {
+        uint16_t tid = static_cast<uint16_t>(msg->gettxnId());
+        m.txn_id = (tid == 0 && m.db_id != 0) ? m.db_id : tid;
+    }
+    m.src_id  = static_cast<uint16_t>(msg->getresponder().num);
+    {
+        auto it = txnid_to_rtl_src_.find(m.txn_id);
+        m.tgt_id = (it != txnid_to_rtl_src_.end())
+                 ? it->second
+                 : static_cast<uint16_t>(msg->getDestination().smallestElement().num);
+    }
     m.qos     = 0;
 
-    // Map CHIResponseType → opcode + resp using the same table as
-    // chi_vip_controller.cc pack_rsp (integers from chi::rsp_optype_e).
+    // Map CHIResponseType → RTL CHI-B opcode + resp (chie_defines.v values).
     switch (msg->gettype()) {
-    case CHIResponseType_Comp_I:       m.opcode=0x1; m.resp=0; break;
-    case CHIResponseType_Comp_SC:      m.opcode=0x1; m.resp=1; break;
-    case CHIResponseType_Comp_UC:      m.opcode=0x1; m.resp=2; break;
-    case CHIResponseType_Comp_UD_PD:   m.opcode=0x1; m.resp=6; break;
-    case CHIResponseType_Comp:         m.opcode=0x1;            break;
-    case CHIResponseType_CompAck:      m.opcode=0x4;            break;
-    case CHIResponseType_DBIDResp:     m.opcode=0x5;            break;
-    case CHIResponseType_CompDBIDResp: m.opcode=0x7;            break;
-    case CHIResponseType_ReadReceipt:  m.opcode=0x8;            break;
-    case CHIResponseType_RespSepData:  m.opcode=0x9;            break;
-    case CHIResponseType_RetryAck:     m.opcode=0xB;            break;
-    case CHIResponseType_PCrdGrant:    m.opcode=0xC;            break;
-    case CHIResponseType_SnpResp_I:    m.opcode=0x13; m.resp=0; break;
-    case CHIResponseType_SnpResp_SC:   m.opcode=0x13; m.resp=1; break;
+    case CHIResponseType_Comp_I:       m.opcode=0x04; m.resp=0; break;
+    case CHIResponseType_Comp_SC:      m.opcode=0x04; m.resp=1; break;
+    case CHIResponseType_Comp_UC:      m.opcode=0x04; m.resp=2; break;
+    case CHIResponseType_Comp_UD_PD:   m.opcode=0x04; m.resp=6; break;
+    case CHIResponseType_Comp:         m.opcode=0x04;            break;
+    case CHIResponseType_CompAck:      m.opcode=0x02;            break;
+    case CHIResponseType_DBIDResp:     m.opcode=0x06;            break;
+    case CHIResponseType_CompDBIDResp: m.opcode=0x05;            break;
+    case CHIResponseType_ReadReceipt:  m.opcode=0x08;            break;
+    case CHIResponseType_RespSepData:  m.opcode=0x0B;            break;
+    case CHIResponseType_RetryAck:     m.opcode=0x03;            break;
+    case CHIResponseType_PCrdGrant:    m.opcode=0x07;            break;
+    case CHIResponseType_SnpResp_I:    m.opcode=0x01; m.resp=0; break;
+    case CHIResponseType_SnpResp_SC:   m.opcode=0x01; m.resp=1; break;
     case CHIResponseType_SnpResp_I_Fwded_UC:
     case CHIResponseType_SnpResp_I_Fwded_UD_PD:
-        m.opcode=0x14; m.resp=0; break;
+        m.opcode=0x09; m.resp=0; break;
     case CHIResponseType_SnpResp_SC_Fwded_SC:
     case CHIResponseType_SnpResp_SC_Fwded_SD_PD:
     case CHIResponseType_SnpResp_SC_Fwded_I:
-        m.opcode=0x14; m.resp=1; break;
+        m.opcode=0x09; m.resp=1; break;
     case CHIResponseType_SnpResp_UC_Fwded_I:
     case CHIResponseType_SnpResp_UD_Fwded_I:
-        m.opcode=0x14; m.resp=2; break;
+        m.opcode=0x09; m.resp=2; break;
     case CHIResponseType_SnpResp_SD_Fwded_I:
-        m.opcode=0x14; m.resp=3; break;
+        m.opcode=0x09; m.resp=3; break;
     default:
-        m.opcode=0x1; break;
+        m.opcode=0x04; break;
     }
     return m;
 }
@@ -459,7 +586,15 @@ VIPController::packDat(const CHIDataMsg* msg, int beatSz)
     m.addr      = static_cast<uint64_t>(msg->getaddr());
     m.txn_id    = static_cast<uint8_t>(msg->gettxnId());
     m.src_id    = static_cast<uint16_t>(msg->getresponder().num);
-    m.tgt_id    = static_cast<uint16_t>(msg->getDestination().smallestElement().num);
+    // Use the original RTL SRCID w(stored when the REQ as forwarded) as tgt_id
+    // so the ICN routes CompData to the correct CHI node.  gem5's MachineID.num
+    // may differ from the RTL node ID assigned in the SV testbench.
+    {
+        auto it = txnid_to_rtl_src_.find(m.txn_id);
+        m.tgt_id = (it != txnid_to_rtl_src_.end())
+                 ? it->second
+                 : static_cast<uint16_t>(msg->getDestination().smallestElement().num);
+    }
     m.home_n_id = static_cast<uint16_t>(msg->getresponder().num);
     m.qos       = 0;
     // Echo the original request TXNID as DBID so the DUT can return it in
@@ -477,20 +612,36 @@ VIPController::packDat(const CHIDataMsg* msg, int beatSz)
 
     m.data_id  = static_cast<uint8_t>(beat * beatSz / 16);
     m.data_len = static_cast<uint16_t>(beatSz);
+    // CCID: which 16-byte chunk within the 64-byte cache line was requested.
+    // gem5 SLICC hardcodes CCID=0 in CHIDataMsg; derive it from the original
+    // byte address stored when the REQ was received.  m.addr is cache-line
+    // aligned (bits[5:0]=0) so it cannot be used directly.
+    // CCID = addr[5:4]: the 16B chunk index within the 64B cache line.
+    // addr[5:4] selects which of the four 16B windows the requested byte is in.
+    {
+        Addr orig_addr = static_cast<Addr>(m.addr);  // fallback: line-aligned
+        auto it = txnid_to_acc_addr_.find(m.txn_id);
+        if (it != txnid_to_acc_addr_.end())
+            orig_addr = it->second;
+        m.cc_id = static_cast<uint8_t>((orig_addr & 0x30) >> 4);
+        fprintf(stderr, "[VIP] packDat txn=0x%03x orig_addr=0x%lx cc_id=%u\n",
+                m.txn_id, static_cast<unsigned long>(orig_addr), (unsigned)m.cc_id);
+    }
 
+    // RTL CHI-B (IHI0050B) opcode values from chie_defines.v
     switch (msg->gettype()) {
     case CHIDataType_CompData_I:     m.opcode=0x4; m.resp=0; break;
     case CHIDataType_CompData_SC:    m.opcode=0x4; m.resp=1; break;
     case CHIDataType_CompData_UC:    m.opcode=0x4; m.resp=2; break;
     case CHIDataType_CompData_UD_PD: m.opcode=0x4; m.resp=6; break;
     case CHIDataType_CompData_SD_PD: m.opcode=0x4; m.resp=7; break;
-    case CHIDataType_DataSepResp_UC: m.opcode=0x3; m.resp=2; break;
-    case CHIDataType_CBWrData_UC:    m.opcode=0x5; m.resp=2; break;
-    case CHIDataType_CBWrData_SC:    m.opcode=0x5; m.resp=1; break;
-    case CHIDataType_CBWrData_UD_PD: m.opcode=0x5; m.resp=5; break;
-    case CHIDataType_CBWrData_SD_PD: m.opcode=0x5; m.resp=7; break;
-    case CHIDataType_CBWrData_I:     m.opcode=0x5; m.resp=0; break;
-    case CHIDataType_NCBWrData:      m.opcode=0x2;            break;
+    case CHIDataType_DataSepResp_UC: m.opcode=0xB; m.resp=2; break;
+    case CHIDataType_CBWrData_UC:    m.opcode=0x2; m.resp=2; break;
+    case CHIDataType_CBWrData_SC:    m.opcode=0x2; m.resp=1; break;
+    case CHIDataType_CBWrData_UD_PD: m.opcode=0x2; m.resp=6; break;
+    case CHIDataType_CBWrData_SD_PD: m.opcode=0x2; m.resp=7; break;
+    case CHIDataType_CBWrData_I:     m.opcode=0x2; m.resp=0; break;
+    case CHIDataType_NCBWrData:      m.opcode=0x3;            break;
     case CHIDataType_SnpRespData_I:     m.opcode=0x1; m.resp=0; break;
     case CHIDataType_SnpRespData_SC:    m.opcode=0x1; m.resp=1; break;
     case CHIDataType_SnpRespData_UC:    m.opcode=0x1; m.resp=2; break;
@@ -507,10 +658,19 @@ VIPController::packDat(const CHIDataMsg* msg, int beatSz)
         const uint8_t* src = msg->getdataBlk().getData(offset, n);
         memcpy(m.data, src, n);
         memset(m.be, 0xff, n);
-        fprintf(stderr, "[VIP] packDat txn=0x%02x addr=0x%lx beat=%d "
-                "offset=%d data[0]=0x%02x data[1]=0x%02x\n",
-                m.txn_id, static_cast<unsigned long>(m.addr), beat, offset,
-                m.data[0], (n > 1 ? m.data[1] : 0));
+        // Snapshot this beat in addr_to_line_data_ so that a later
+        // SnpRespDataPtl from the RTL can restore the clean sublines.
+        {
+            auto& line = addr_to_line_data_[static_cast<Addr>(m.addr)];
+            if ((int)line.size() < cacheLineSz_)
+                line.resize(cacheLineSz_, 0);
+            memcpy(line.data() + offset, m.data, n);
+        }
+        fprintf(stderr, "[VIP] packDat txn=0x%03x tgt=%u addr=0x%lx beat=%d "
+                "offset=%d n=%d data[0]=0x%02x data[32]=0x%02x\n",
+                m.txn_id, (unsigned)m.tgt_id,
+                static_cast<unsigned long>(m.addr), beat, offset, n,
+                m.data[0], (n > 32 ? m.data[32] : 0));
     }
     return m;
 }
@@ -539,34 +699,34 @@ VIPController::packSnp(const CHIRequestMsg* msg)
 CHIRequestType
 VIPController::sccToGem5Req(uint8_t op)
 {
-    // chi::req_optype_e integers from IHI0050 / scc header
+    // RTL CHI-B (IHI0050B) opcode values from chie_defines.v
     switch (op) {
     case 0x01: return CHIRequestType_ReadShared;
-    case 0x02: return CHIRequestType_ReadShared;    // ReadClean not in this build's enum
+    case 0x02: return CHIRequestType_ReadClean;
     case 0x03: return CHIRequestType_ReadOnce;
-    case 0x07: return CHIRequestType_ReadNotSharedDirty;
-    case 0x0B: return CHIRequestType_ReadUnique;
-    case 0x11: return CHIRequestType_CleanUnique;
-    case 0x15: return CHIRequestType_MakeReadUnique;
-    case 0x17: return CHIRequestType_Evict;
+    case 0x04: return CHIRequestType_ReadNoSnp;
+    case 0x07: return CHIRequestType_ReadUnique;
+    case 0x0B: return CHIRequestType_CleanUnique;
+    case 0x0D: return CHIRequestType_Evict;
+    case 0x17: return CHIRequestType_WriteCleanFull;
+    case 0x18: return CHIRequestType_WriteUniquePtl;
+    case 0x19: return CHIRequestType_WriteUniqueFull;
     case 0x1A: return CHIRequestType_WriteBackPtl;
     case 0x1B: return CHIRequestType_WriteBackFull;
-    case 0x1C: return CHIRequestType_WriteCleanFull;
-    case 0x1D: return CHIRequestType_WriteEvictFull;
-    case 0x20: return CHIRequestType_WriteUniquePtl;
-    case 0x21: return CHIRequestType_WriteUniqueFull;
-    case 0x22: return CHIRequestType_WriteUniqueZero;
-    case 0x23: return CHIRequestType_WriteNoSnpPtl;
-    case 0x24: return CHIRequestType_WriteNoSnp;
-    case 0x30: return CHIRequestType_ReadNoSnp;
-    case 0x31: return CHIRequestType_ReadNoSnpSep;
-    case 0x36: return CHIRequestType_StashOnceShared;
-    case 0x37: return CHIRequestType_StashOnceUnique;
-    case 0x38: return CHIRequestType_DvmOpNonSync;
-    case 0x40: return CHIRequestType_AtomicLoad;
-    case 0x44: return CHIRequestType_AtomicStore;
-    case 0x48: return CHIRequestType_AtomicReturn;
-    case 0x49: return CHIRequestType_AtomicNoReturn;
+    case 0x1C: return CHIRequestType_WriteNoSnpPtl;
+    case 0x1D: return CHIRequestType_WriteNoSnp;
+    case 0x15: return CHIRequestType_WriteEvictFull;
+    case 0x41: return CHIRequestType_MakeReadUnique;
+    // CHI-E AtomicStore (0x28–0x2f): no return value → network-facing AtomicNoReturn
+    case 0x28: case 0x29: case 0x2a: case 0x2b:
+    case 0x2c: case 0x2d: case 0x2e: case 0x2f:
+        return CHIRequestType_AtomicNoReturn;
+    // CHI-E AtomicLoad (0x30–0x37), AtomicSwap (0x38), AtomicCompare (0x39):
+    // return old value → network-facing AtomicReturn
+    case 0x30: case 0x31: case 0x32: case 0x33:
+    case 0x34: case 0x35: case 0x36: case 0x37:
+    case 0x38: case 0x39:
+        return CHIRequestType_AtomicReturn;
     default:   return CHIRequestType_ReadOnce;
     }
 }

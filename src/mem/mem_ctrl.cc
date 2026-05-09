@@ -422,8 +422,21 @@ MemCtrl::recvTimingReq(PacketPtr pkt)
     }
     prevArrival = curTick();
 
-    panic_if(!(dram->getAddrRange().contains(pkt->getAddr())),
-             "Can't handle address range for packet %s\n", pkt->print());
+    if (!dram->getAddrRange().contains(pkt->getAddr())) {
+        // Co-simulation: RTL may access ROM/MMIO addresses outside the
+        // configured DRAM range (e.g. CVA6 reset vector at 0xfff1010000).
+        // Return zeros for reads; silently discard writes.
+        warn_once("MemCtrl: out-of-range %s %#x — returning zeros\n",
+                  pkt->cmdString(), pkt->getAddr());
+        if (pkt->isRead()) {
+            if (!pkt->hasData())
+                pkt->allocate();
+            memset(pkt->getPtr<uint8_t>(), 0, pkt->getSize());
+        }
+        pkt->makeResponse();
+        port.schedTimingResp(pkt, curTick() + 100);
+        return true;
+    }
 
     // Find out how many memory packets a pkt translates to
     // If the burst size is equal or larger than the pkt size, then a pkt

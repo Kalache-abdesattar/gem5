@@ -452,6 +452,7 @@ TBE allocateRequestTBE(Addr addr, CHIRequestMsg in_msg), return_by_pointer="yes"
 
   tbe.atomic_op.clear();
   tbe.atomic_op.orMask(in_msg.atomic_op);
+  tbe.chiAtomicSubOp := in_msg.chiAtomicSubOp;
   tbe.atomic_to_be_done := false;
   tbe.atomic_to_be_wb := false;
 
@@ -459,6 +460,8 @@ TBE allocateRequestTBE(Addr addr, CHIRequestMsg in_msg), return_by_pointer="yes"
   tbe.use_DCT := false;
 
   tbe.hasUseTimeout := false;
+
+  tbe.opcode := in_msg.type;
 
   return tbe;
 }
@@ -800,6 +803,7 @@ bool needCacheEntry(CHIRequestType req_type,
   if (is_valid(cache_entry) ||
       (enable_DMT && is_invalid(dir_entry) &&
        ((req_type == CHIRequestType:ReadShared) ||
+        (req_type == CHIRequestType:ReadClean) ||
         (req_type == CHIRequestType:ReadUnique) ||
         (req_type == CHIRequestType:MakeReadUnique) ||
         (req_type == CHIRequestType:ReadOnce)))) {
@@ -807,6 +811,7 @@ bool needCacheEntry(CHIRequestType req_type,
   } else {
     return is_prefetch ||
            (alloc_on_readshared && ((req_type == CHIRequestType:ReadShared) ||
+                                    (req_type == CHIRequestType:ReadClean) ||
                                     (req_type == CHIRequestType:ReadNotSharedDirty))) ||
            (alloc_on_readunique && ((req_type == CHIRequestType:ReadUnique) ||
                                    (req_type == CHIRequestType:MakeReadUnique))) ||
@@ -827,6 +832,7 @@ bool needCacheEntry(CHIRequestType req_type,
 
 bool needDeallocCacheEntry(CHIRequestType req_type) {
   return (dealloc_on_shared && ((req_type == CHIRequestType:ReadShared) ||
+                                (req_type == CHIRequestType:ReadClean) ||
                                 (req_type == CHIRequestType:ReadNotSharedDirty))) ||
          (dealloc_on_unique && ((req_type == CHIRequestType:ReadUnique) ||
                                 (req_type == CHIRequestType:MakeReadUnique) ||
@@ -846,8 +852,8 @@ bool upstreamHasShared(State state) {
 }
 
 void printTBEState(TBE tbe) {
-  DPRINTF(RubySlicc, "STATE: addr: %#x data present=%d valid=%d unique=%d dirty=%d mu_dirty=%d dir ownerV=%d ownerE=%d sharers=%d tobe_I=%d tobe_SC=%d doFill=%d pendAction=%s txnId=%d\n",
-                      tbe.addr, tbe.dataBlkValid.isFull(), tbe.dataValid, tbe.dataUnique,
+  DPRINTF(RubySlicc, "STATE: addr: %#x opcode={%#x, %d} data present=%d valid=%d unique=%d dirty=%d mu_dirty=%d dir ownerV=%d ownerE=%d sharers=%d tobe_I=%d tobe_SC=%d doFill=%d pendAction=%s txnId=%d\n",
+                      tbe.addr, tbe.opcode, tbe.opcode, tbe.dataBlkValid.isFull(), tbe.dataValid, tbe.dataUnique,
                       tbe.dataDirty, tbe.dataMaybeDirtyUpstream, tbe.dir_ownerExists,
                       tbe.dir_ownerIsExcl,tbe.dir_sharers.count(),
                       tbe.dataToBeInvalid, tbe.dataToBeSharedClean,
@@ -1190,6 +1196,7 @@ void clearPendingAction(TBE tbe) {
 bool isReadReqType(CHIRequestType type) {
   if (type == CHIRequestType:Load ||
       type == CHIRequestType:ReadShared ||
+      type == CHIRequestType:ReadClean ||
       type == CHIRequestType:ReadNotSharedDirty ||
       type == CHIRequestType:MakeReadUnique ||
       type == CHIRequestType:ReadNoSnp ||
@@ -1239,6 +1246,8 @@ Event reqToEvent(CHIRequestType type, bool is_prefetch) {
     return Event:AtomicStore;
   } else if (type == CHIRequestType:ReadShared) {
     return Event:ReadShared;
+  } else if (type == CHIRequestType:ReadClean) {
+    return Event:ReadClean;
   } else if (type == CHIRequestType:ReadNotSharedDirty) {
     return Event:ReadNotSharedDirty;
   } else if (type == CHIRequestType:ReadUnique) {

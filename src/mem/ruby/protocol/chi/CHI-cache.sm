@@ -308,6 +308,7 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     AtomicStore,                 desc="", in_trans="yes";
     Prefetch,                    desc="", in_trans="yes";
     ReadShared,                  desc="", in_trans="yes";
+    ReadClean,                   desc="", in_trans="yes";
     ReadNotSharedDirty,          desc="", in_trans="yes";
     ReadUnique,                  desc="", in_trans="yes";
     ReadUnique_PoC,              desc="", in_trans="yes";
@@ -671,6 +672,7 @@ machine(MachineType:Cache, "Cache coherency protocol") :
 
     // Atomic info associated with the transaction
     WriteMask atomic_op,    desc="Atomic Operation Wrapper";
+    int chiAtomicSubOp,     default="0", desc="CHI-E atomic sub-opcode (0x28-0x39); 0 for sequencer atomics";
     bool atomic_to_be_done, desc="We have yet to perform the atomic";
     bool atomic_to_be_wb,   desc="We are writebacking the atomic";
 
@@ -767,6 +769,8 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     bool wakeup_pending_req;
     bool wakeup_pending_snp;
     bool wakeup_pending_tgr;
+
+    CHIRequestType opcode;
   }
 
   // TBE table definition

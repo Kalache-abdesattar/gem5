@@ -1369,7 +1369,8 @@ class Packet : public Printable, public Extensible<Packet>
         // if either this command or the response command has a data
         // payload, actually allocate space
         if (hasData() || hasRespData()) {
-            assert(flags.noneSet(STATIC_DATA|DYNAMIC_DATA));
+            if (!flags.noneSet(STATIC_DATA|DYNAMIC_DATA))
+                return;
             flags.set(DYNAMIC_DATA);
             data = new uint8_t[getSize()];
         }

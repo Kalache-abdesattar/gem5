@@ -104,6 +104,10 @@ class DataBlock
     void copyPartial(const DataBlock &dblk, const WriteMask &mask);
     void atomicPartial(const DataBlock & dblk, const WriteMask & mask,
             bool isAtomicNoReturn=true);
+    // Apply a CHI-E network atomic operation (sub-opcode 0x28-0x39) in-place.
+    // Reads 8-byte operand from `operand` at `byteOffset` (doubleword-aligned),
+    // applies the operation to the corresponding bytes of this block.
+    void networkAtomicOp(int chiSubOp, const DataBlock& operand, int byteOffset);
     bool equal(const DataBlock& obj) const;
     void print(std::ostream& out) const;
 

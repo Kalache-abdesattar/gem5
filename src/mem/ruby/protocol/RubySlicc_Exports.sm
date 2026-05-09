@@ -83,6 +83,7 @@ structure(DataBlock, external = "yes", desc="..."){
   void copyPartial(DataBlock, WriteMask);
   void atomicPartial(DataBlock, WriteMask);
   void atomicPartial(DataBlock, WriteMask, bool);
+  void networkAtomicOp(int, DataBlock, int);
   int numAtomicLogEntries();
   void clearAtomicLogEntries();
 }

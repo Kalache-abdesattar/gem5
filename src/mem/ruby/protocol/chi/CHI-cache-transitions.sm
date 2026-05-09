@@ -179,9 +179,9 @@ transition({BUSY_INTR,BUSY_BLKD}, SnpOncePipe) {
   ProcessNextState_ClearPending;
 }
 
-// ReadShared / ReadNotSharedDirty
+// ReadShared / ReadClean / ReadNotSharedDirty
 
-transition(I, {ReadShared,ReadNotSharedDirty}, BUSY_BLKD) {
+transition(I, {ReadShared,ReadClean,ReadNotSharedDirty}, BUSY_BLKD) {
   Initiate_Request;
   Initiate_ReadShared_Miss;
   Allocate_DirEntry;
@@ -190,7 +190,7 @@ transition(I, {ReadShared,ReadNotSharedDirty}, BUSY_BLKD) {
   ProcessNextState;
 }
 
-transition({RSC,RUSC}, {ReadShared,ReadNotSharedDirty}, BUSY_BLKD) {
+transition({RSC,RUSC}, {ReadShared,ReadClean,ReadNotSharedDirty}, BUSY_BLKD) {
   Initiate_Request;
   Initiate_ReadShared_HitUpstream_NoOwner;
   Profile_Miss;
@@ -198,7 +198,7 @@ transition({RSC,RUSC}, {ReadShared,ReadNotSharedDirty}, BUSY_BLKD) {
   ProcessNextState;
 }
 
-transition({UD,SD,UC,SC}, {ReadShared,ReadNotSharedDirty}, BUSY_BLKD) {
+transition({UD,SD,UC,SC}, {ReadShared,ReadClean,ReadNotSharedDirty}, BUSY_BLKD) {
   Initiate_Request;
   Initiate_ReadShared_Hit;
   Allocate_DirEntry;
@@ -207,7 +207,7 @@ transition({UD,SD,UC,SC}, {ReadShared,ReadNotSharedDirty}, BUSY_BLKD) {
   ProcessNextState;
 }
 
-transition({UD_RSC,SD_RSC,UC_RSC,SC_RSC,UD_RSD,SD_RSD}, {ReadShared,ReadNotSharedDirty}, BUSY_BLKD) {
+transition({UD_RSC,SD_RSC,UC_RSC,SC_RSC,UD_RSD,SD_RSD}, {ReadShared,ReadClean,ReadNotSharedDirty}, BUSY_BLKD) {
   Initiate_Request;
   Initiate_ReadShared_Hit;
   Profile_Hit;
@@ -215,7 +215,7 @@ transition({UD_RSC,SD_RSC,UC_RSC,SC_RSC,UD_RSD,SD_RSD}, {ReadShared,ReadNotShare
   ProcessNextState;
 }
 
-transition({UD_RU,UC_RU,RU,RSD,RUSD}, {ReadShared,ReadNotSharedDirty}, BUSY_BLKD) {
+transition({UD_RU,UC_RU,RU,RSD,RUSD}, {ReadShared,ReadClean,ReadNotSharedDirty}, BUSY_BLKD) {
   Initiate_Request;
   Initiate_ReadShared_HitUpstream;
   Profile_Miss;
@@ -964,7 +964,7 @@ transition({I,SC,UC,SD,UD,RU,RSC,RSD,RUSD,SC_RSC,UC_RSC,SD_RSC,UD_RSC,UC_RU,UD_R
 // Stalls
 
 transition({BUSY_BLKD,BUSY_INTR},
-            {ReadShared, ReadNotSharedDirty, ReadUnique, ReadUnique_PoC,
+            {ReadShared, ReadClean, ReadNotSharedDirty, ReadUnique, ReadUnique_PoC,
             ReadNoSnp,
             ReadOnce, CleanUnique, CleanUnique_Stale,
             Load, Store, AtomicLoad, AtomicStore, Prefetch,

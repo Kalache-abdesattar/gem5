@@ -681,26 +681,53 @@ action(Initiate_ReadUnique_Hit, desc="") {
 
 action(Initiate_ReadUnique_HitUpstream, desc="") {
   tbe.actions.push(Event:ReadMissPipe);
-  // SnpUniqueFwd can be used only if the line is cached at a single
-  // requester; so force it off if that's the case
-  tbe.use_DCT := tbe.use_DCT && (tbe.dir_sharers.count() == 1) &&
-                 (tbe.dir_sharers.isElement(tbe.requestor) == false);
-  if (tbe.use_DCT) {
-    tbe.actions.push(Event:SendSnpUniqueFwd);
-    tbe.actions.pushNB(Event:WaitCompAck);
-    tbe.updateDirOnCompAck := false;
-  } else if (tbe.dataMaybeDirtyUpstream) {
-    tbe.actions.push(Event:SendSnpUnique);
+  // Self-snoop short-circuit: requestor is the sole sharer — snooping it
+  // would deadlock (RTL RN-F cannot respond to a snoop while waiting for
+  // CompData on the same line).  Serve from memory: data may be stale w.r.t.
+  // a dirty copy at the RN-F, but ReadUnique is a write intent so the
+  // requester will overwrite any stale bytes.
+  if ((tbe.dir_sharers.count() == 1) &&
+      tbe.dir_sharers.isElement(tbe.requestor)) {
+    tbe.dir_sharers.clear();
+    tbe.dir_ownerExists := false;
+    tbe.dataMaybeDirtyUpstream := false;
+    tbe.dataUnique := true;
+    tbe.dataValid := true;
+    tbe.dataDirty := false;
+    tbe.dataBlkValid.fillMask();
+    // Initiate_Request (unlike Initiate_Request_Stale) does not populate
+    // tbe.dataBlk for UD_RU/UC_RU states — copyCacheAndDir clears it.
+    // Copy the LLC data now so Send_CompData serves correct bytes instead
+    // of the zero-initialised TBE dataBlk.
+    if (is_valid(cache_entry)) {
+      tbe.dataBlk := cache_entry.DataBlk;
+    }
+    tbe.actions.push(Event:DataArrayRead);
     tbe.actions.push(Event:WaitCompAck);
     tbe.actions.pushNB(Event:SendCompData);
+    tbe.actions.pushNB(Event:TagArrayWrite);
   } else {
-    // no one will send us data unless we explicitly ask
-    tbe.actions.push(Event:SendSnpUniqueRetToSrc);
-    tbe.actions.push(Event:WaitCompAck);
-    tbe.actions.pushNB(Event:SendCompData);
+    // SnpUniqueFwd can be used only if the line is cached at a single
+    // requester; so force it off if that's the case
+    tbe.use_DCT := tbe.use_DCT && (tbe.dir_sharers.count() == 1) &&
+                   (tbe.dir_sharers.isElement(tbe.requestor) == false);
+    if (tbe.use_DCT) {
+      tbe.actions.push(Event:SendSnpUniqueFwd);
+      tbe.actions.pushNB(Event:WaitCompAck);
+      tbe.updateDirOnCompAck := false;
+    } else if (tbe.dataMaybeDirtyUpstream) {
+      tbe.actions.push(Event:SendSnpUnique);
+      tbe.actions.push(Event:WaitCompAck);
+      tbe.actions.pushNB(Event:SendCompData);
+    } else {
+      // no one will send us data unless we explicitly ask
+      tbe.actions.push(Event:SendSnpUniqueRetToSrc);
+      tbe.actions.push(Event:WaitCompAck);
+      tbe.actions.pushNB(Event:SendCompData);
+    }
+    // just tag update since data any data would become stale
+    tbe.actions.pushNB(Event:TagArrayWrite);
   }
-  // just tag update since data any data would become stale
-  tbe.actions.pushNB(Event:TagArrayWrite);
 }
 
 action(Initiate_ReadUnique_Hit_InvUpstream, desc="") {
@@ -1956,12 +1983,23 @@ action(Send_SnpShared, desc="") {
   clearExpectedSnpResp(tbe);
   tbe.expected_snp_resp.addExpectedDataType(CHIDataType:SnpRespData_SC);
   tbe.expected_snp_resp.addExpectedDataType(CHIDataType:SnpRespData_SC_PD);
+  // RTL RN-F may respond with I state (invalidate) even for SnpShared:
+  // SnpRespData_I_PD — dirty data, snoopee chose to invalidate (CHI-compliant)
+  // SnpRespData_I    — clean data returned with invalidate (retToSrc=true path)
+  // SnpResp_I        — snoopee already in I state, no data available
+  tbe.expected_snp_resp.addExpectedDataType(CHIDataType:SnpRespData_I_PD);
+  tbe.expected_snp_resp.addExpectedDataType(CHIDataType:SnpRespData_I);
+  tbe.expected_snp_resp.addExpectedRespType(CHIResponseType:SnpResp_I);
   tbe.expected_snp_resp.setExpectedCount(1);
 
   enqueue(snpOutPort, CHIRequestMsg, snoop_latency) {
     prepareRequest(tbe, CHIRequestType:SnpShared, out_msg);
     out_msg.Destination.add(tbe.dir_owner);
-    out_msg.retToSrc := false;
+    // RetToSrc=true forces the snoopee to return a data copy to the HN-F
+    // even when the line is clean.  Without this, an RN-F with a clean
+    // unique copy may legally send SnpResp_I (no data), leaving the HN-F
+    // to fall back to backing memory which may hold stale zeros.
+    out_msg.retToSrc := true;
     out_msg.ns := tbe.ns;
   }
 }
@@ -2521,8 +2559,17 @@ action(UpdateDataState_FromADataResp, desc="") {
     DPRINTF(RubySlicc, "Atomic before %s\n", tbe.dataBlk);
 
     tbe.oldDataBlk := tbe.dataBlk;
-    tbe.dataBlk.atomicPartial(tbe.dataBlk, tbe.atomic_op);
-    tbe.dataBlk.clearAtomicLogEntries();
+    if (tbe.chiAtomicSubOp != 0) {
+      // Network atomic from external RN-F (e.g. VIPController): operand
+      // arrives in NCBWrData; sub-opcode identifies the operation.
+      peek(datInPort, CHIDataMsg) {
+        tbe.dataBlk.networkAtomicOp(tbe.chiAtomicSubOp, in_msg.dataBlk,
+                                    addressOffset(tbe.accAddr, tbe.addr));
+      }
+    } else {
+      tbe.dataBlk.atomicPartial(tbe.dataBlk, tbe.atomic_op);
+      tbe.dataBlk.clearAtomicLogEntries();
+    }
     tbe.dataDirty := true;
 
     DPRINTF(RubySlicc, "Atomic after %s\n", tbe.dataBlk);
@@ -2635,6 +2682,31 @@ action(UpdateDirState_FromSnpResp, desc="") {
       tbe.dir_sharers.remove(in_msg.responder);
       if (tbe.dir_ownerExists && (tbe.dir_owner == in_msg.responder)){
         tbe.dir_ownerExists := false;
+      }
+      // RTL RN-F may send SnpResp_I for a clean line it just evicted,
+      // meaning no data came with the snoop response.  In that case the
+      // HN-F must fetch the line from backing memory before it can send
+      // CompData to the original requester.
+      // The TBE was initialised with dataUnique=true and
+      // dataMaybeDirtyUpstream=true because the upstream node held the
+      // line exclusively (UC_RU/RU initial state).  The snoopee has now
+      // invalidated its copy, so neither flag applies any longer; clearing
+      // them prevents assertion failures in UpdateDataState_FromReqDataResp
+      // when CompData_UC arrives from memory.
+      if (is_HN && (tbe.dataValid == false)) {
+        tbe.dataUnique := false;
+        tbe.dataMaybeDirtyUpstream := false;
+        // SnpResp_I without data means the snoopee's copy was clean.
+        // If the HN-F LLC has valid data, use it rather than fetching
+        // stale data from memory (which may lag behind a WriteBack that
+        // has not yet reached the backing store).
+        if (is_valid(cache_entry)) {
+          tbe.dataBlk := cache_entry.DataBlk;
+          tbe.dataBlkValid.fillMask();
+          tbe.dataValid := true;
+        } else {
+          tbe.actions.pushFront(Event:SendReadNoSnp);
+        }
       }
 
     } else if (in_msg.type == CHIResponseType:SnpResp_SC) {
@@ -2800,9 +2872,12 @@ action(Send_CompData, desc="") {
 
   bool is_rd_once := tbe.reqType == CHIRequestType:ReadOnce;
   bool is_rd_no_snp := tbe.reqType == CHIRequestType:ReadNoSnp;
+  bool is_rd_clean := tbe.reqType == CHIRequestType:ReadClean;
   bool is_rd_shared := (tbe.reqType == CHIRequestType:ReadShared) ||
+                       (tbe.reqType == CHIRequestType:ReadClean) ||
                        (tbe.reqType == CHIRequestType:ReadNotSharedDirty);
-  bool is_rd_nsd := tbe.reqType == CHIRequestType:ReadNotSharedDirty;
+  // ReadNotSharedDirty and ReadClean both forbid SD_PD; ReadClean also forbids UD_PD
+  bool is_rd_nsd := (tbe.reqType == CHIRequestType:ReadNotSharedDirty) || is_rd_clean;
   bool is_rd_unique := tbe.reqType == CHIRequestType:ReadUnique ||
                        tbe.reqType == CHIRequestType:MakeReadUnique;
 
@@ -2823,7 +2898,8 @@ action(Send_CompData, desc="") {
     tbe.snd_msgType := CHIDataType:CompData_I;
   } else if (is_rd_unique || (is_rd_shared && snd_unique_on_rs)) {
     assert(tbe.dataUnique);
-    if (tbe.dataDirty) {
+    // ReadClean must never pass dirty: respond UC (HN-F retains dirty ownership)
+    if (tbe.dataDirty && !is_rd_clean) {
       tbe.snd_msgType := CHIDataType:CompData_UD_PD;
     } else {
       tbe.snd_msgType := CHIDataType:CompData_UC;

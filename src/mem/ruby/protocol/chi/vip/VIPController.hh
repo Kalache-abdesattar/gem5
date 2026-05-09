@@ -27,6 +27,7 @@
 #ifndef __MEM_RUBY_PROTOCOL_CHI_VIP_VIPCONTROLLER_HH__
 #define __MEM_RUBY_PROTOCOL_CHI_VIP_VIPCONTROLLER_HH__
 
+#include <queue>
 #include <string>
 #include <unordered_map>
 
@@ -62,11 +63,33 @@ class VIPController : public CHIGenericController
     chi_ipc::ChiShmHandle shm_;
     const int             cacheLineSz_;
 
+    // Staging queue for inbound requests: q2g_req is always drained into this
+    // buffer; each wakeup() then flushes as many entries as reqOut can accept.
+    // This prevents silent drops when reqOut is temporarily full.
+    std::queue<CHIRequestMsgPtr> pendingReqs_;
+
     // Maps txnId → cache-line address for outstanding write transactions.
     // Populated in makeReqMsg; entries are removed when a write completes
     // (Comp or CompDBIDResp received).  Allows makeDatMsg to set the correct
     // addr on NCBWrData messages (DAT flits carry no address field).
-    std::unordered_map<uint8_t, Addr> txnid_to_addr_;
+    std::unordered_map<uint16_t, Addr> txnid_to_addr_;
+
+    // Maps txnId → RTL SRCID from the original IPC REQ.  Used in packDat and
+    // packRsp to set tgt_id = actual RTL node ID rather than gem5's internal
+    // MachineID.num (which may differ from the CHI node ID in the RTL).
+    std::unordered_map<uint16_t, uint16_t> txnid_to_rtl_src_;
+
+    // Maps txnId → original byte-accurate request address (not cache-line
+    // aligned).  Used in packDat to compute CCID correctly: gem5 SLICC always
+    // emits CCID=0 in CHIDataMsg; we must reconstruct it from the request addr.
+    std::unordered_map<uint16_t, Addr> txnid_to_acc_addr_;
+
+    // Snapshot of the most-recent complete cache-line data sent to the RTL,
+    // keyed by cache-line-aligned address.  Used in makeDatMsg to reconstruct
+    // the full line when the RTL returns a SnpRespDataPtl (partially dirty):
+    // clean sublines from the RTL contain zeros; we restore them from this
+    // cache so gem5 receives a full, valid cache line.
+    std::unordered_map<Addr, std::vector<uint8_t>> addr_to_line_data_;
 
     // ── Inbound (q2g): IPC → gem5 message objects ─────────────────────────────
     CHIRequestMsgPtr  makeReqMsg(const chi_ipc::ChiIpcReq& m);

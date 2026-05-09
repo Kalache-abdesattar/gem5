@@ -58,6 +58,7 @@ enumeration(CHIRequestType, desc="") {
 
   // CHI request types
   ReadShared;
+  ReadClean;
   ReadNotSharedDirty;
   ReadUnique;
   ReadOnce;
@@ -123,6 +124,7 @@ structure(CHIRequestMsg, desc="", interface="Message") {
   bool is_remote_pf,        desc="Request generated a prefetcher in another cache";
 
   WriteMask atomic_op,      desc="Atomic Operation Wrapper";
+  int chiAtomicSubOp,       default="0", desc="CHI-E atomic sub-opcode (0x28-0x39); 0 for non-atomics and sequencer atomics";
 
   bool usesTxnId,       desc="True if using a Transaction ID", default="false";
   Addr txnId,           desc="Transaction ID", default="0";

@@ -40,6 +40,9 @@
 
 #include "mem/ruby/common/DataBlock.hh"
 
+#include <cstdint>
+#include <cstring>
+
 #include "mem/ruby/common/Address.hh"
 #include "mem/ruby/common/WriteMask.hh"
 
@@ -254,6 +257,36 @@ DataBlock::operator=(const DataBlock & obj)
         m_atomicLog.push_back(block_update);
     }
     return *this;
+}
+
+void
+DataBlock::networkAtomicOp(int chiSubOp, const DataBlock& operand,
+                            int byteOffset)
+{
+    int alignedOff = byteOffset & ~7;  // doubleword-aligned offset
+    uint64_t src = 0;
+    uint64_t dst = 0;
+    std::memcpy(&src, operand.getData(alignedOff, 8), sizeof(src));
+    std::memcpy(&dst, getData(alignedOff, 8), sizeof(dst));
+
+    uint64_t result = dst;
+    switch (chiSubOp) {
+    case 0x28: case 0x30: result = dst + src; break;               // Add
+    case 0x29: case 0x31: result = dst & ~src; break;              // Clr
+    case 0x2a: case 0x32: result = dst ^ src; break;               // Eor
+    case 0x2b: case 0x33: result = dst | src; break;               // Set
+    case 0x2c: case 0x34:                                          // SMax
+        if (static_cast<int64_t>(src) > static_cast<int64_t>(dst)) result = src;
+        break;
+    case 0x2d: case 0x35:                                          // SMin
+        if (static_cast<int64_t>(src) < static_cast<int64_t>(dst)) result = src;
+        break;
+    case 0x2e: case 0x36: if (src > dst) result = src; break;     // UMax
+    case 0x2f: case 0x37: if (src < dst) result = src; break;     // UMin
+    case 0x38: result = src; break;                                // Swap
+    default:   break;                                              // no-op
+    }
+    setData(reinterpret_cast<const uint8_t*>(&result), alignedOff, 8);
 }
 
 } // namespace ruby

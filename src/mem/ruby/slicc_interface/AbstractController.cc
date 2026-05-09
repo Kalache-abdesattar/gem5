@@ -281,6 +281,7 @@ AbstractController::serviceMemoryQueue()
     PacketPtr pkt;
     if (mem_msg->getType() == MemoryRequestType_MEMORY_WB) {
         pkt = Packet::createWrite(req);
+        pkt->deleteData();
         pkt->allocate();
         pkt->setData(mem_msg->m_DataBlk.getData(getOffset(mem_msg->m_addr),
             req_size));
@@ -441,6 +442,7 @@ const
             if (mapping != i.second.end())
                 return mapping->second;
         }
+        // No match — fall through to first-available below
     }
     else {
         const auto i = downstreamAddrMap.find(mtype);
@@ -449,6 +451,22 @@ const
             if (mapping != i->second.end())
                 return mapping->second;
         }
+    }
+
+    // Address not in any configured range.  For co-simulation the RTL RN-F
+    // may access ROM/MMIO addresses outside the declared mem_ranges (e.g. the
+    // CVA6 reset vector at 0xfff1010000).  Rather than fatal, route to the
+    // first downstream machine of the requested type so gem5 can still serve
+    // the request (returning zeroed data on the first access).
+    const MachineType probe = (mtype == MachineType_NUM)
+                                  ? downstreamAddrMap.begin()->first
+                                  : mtype;
+    const auto fi = downstreamAddrMap.find(probe);
+    if (fi != downstreamAddrMap.end() && !fi->second.empty()) {
+        warn_once("%s: no mapping for address %#x mtype=%s — "
+                  "routing to first available downstream machine\n",
+                  name(), addr, mtype);
+        return fi->second.begin()->second;
     }
     fatal("%s: couldn't find mapping for address %x mtype=%s\n",
         name(), addr, mtype);
