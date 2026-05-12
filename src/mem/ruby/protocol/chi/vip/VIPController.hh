@@ -62,6 +62,8 @@ class VIPController : public CHIGenericController
   private:
     chi_ipc::ChiShmHandle shm_;
     const int             cacheLineSz_;
+    const int             rnf_index_;    // which q2g slot this VIP reads from
+    const uint16_t        rtl_src_id_;  // RTL CHI NodeID of the RN-F we proxy
 
     // Staging queue for inbound requests: q2g_req is always drained into this
     // buffer; each wakeup() then flushes as many entries as reqOut can accept.
@@ -73,11 +75,6 @@ class VIPController : public CHIGenericController
     // (Comp or CompDBIDResp received).  Allows makeDatMsg to set the correct
     // addr on NCBWrData messages (DAT flits carry no address field).
     std::unordered_map<uint16_t, Addr> txnid_to_addr_;
-
-    // Maps txnId → RTL SRCID from the original IPC REQ.  Used in packDat and
-    // packRsp to set tgt_id = actual RTL node ID rather than gem5's internal
-    // MachineID.num (which may differ from the CHI node ID in the RTL).
-    std::unordered_map<uint16_t, uint16_t> txnid_to_rtl_src_;
 
     // Maps txnId → original byte-accurate request address (not cache-line
     // aligned).  Used in packDat to compute CCID correctly: gem5 SLICC always

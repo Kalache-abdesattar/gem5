@@ -23,6 +23,17 @@ class VIPController(CHIGenericController):
     cxx_class  = "gem5::ruby::VIPController"
 
     # Name of the POSIX shared-memory segment (must begin with '/').
-    # gem5 creates it; questa_top_ipc attaches.
+    # The VIPController with rnf_index=0 creates it; all others open it.
     shm_name = Param.String("/chi_vip_0",
         "POSIX shm segment name for gem5 ↔ Questa IPC")
+
+    # Index into the per-RN-F q2g ring buffer arrays (0-based).
+    # Must be unique across VIPControllers sharing the same shm_name.
+    rnf_index = Param.Int(0,
+        "Index into per-RN-F q2g ring buffer arrays (0 = creator)")
+
+    # RTL CHI NodeID of the RN-F this VIPController proxies.
+    # Written into shm->rnf_nid[rnf_index] at init so questa_top_ipc
+    # can route incoming flits by src_id to the correct q2g slot.
+    rtl_src_id = Param.Int(0,
+        "RTL CHI NodeID of the RN-F this controller proxies")

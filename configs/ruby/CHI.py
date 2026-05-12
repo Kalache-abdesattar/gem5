@@ -246,19 +246,24 @@ def create_system(
             if _cfg_root not in _sys.path:
                 _sys.path.insert(0, _cfg_root)
             from config.chi.nodes.vip_requestor import VIPRequestorCoSim
-            for shm_name in vip_shm_names:
+            vip_rnf_src_ids = getattr(system, '_vip_rnf_src_ids',
+                                      list(range(len(vip_shm_names))))
+            for i, shm_name in enumerate(vip_shm_names):
+                rtl_src_id = vip_rnf_src_ids[i] if i < len(vip_rnf_src_ids) else i
                 vip = VIPRequestorCoSim(
                     network=ruby_system.network,
                     cache_line_size=system.cache_line_size.value,
                     ruby_system=ruby_system,
                     shm_name=shm_name,
+                    rnf_index=i,
+                    rtl_src_id=rtl_src_id,
                 )
                 vip.downstream_destinations = hnf_dests
                 network_cntrls.append(vip)
                 all_cntrls.append(vip)
                 system._vip_nodes.append(vip)
                 print(f"[CHI] VIPController added: version={vip.version}"
-                      f" shm='{shm_name}'")
+                      f" shm='{shm_name}' rnf_index={i} rtl_src_id={rtl_src_id}")
         except Exception as e:
             import traceback
             print(f"[CHI] Warning: VIPController not available: {e}")

@@ -35,16 +35,43 @@ namespace ruby {
 
 VIPController::VIPController(const Params& p)
     : CHIGenericController(p)
-    , shm_(p.shm_name, /*create=*/true)  // gem5 always creates the segment
+    // rnf_index==0 creates the segment (shm_unlink + placement-new).
+    // Higher indices open the already-created segment immediately.
+    , shm_(p.shm_name, /*create=*/(p.rnf_index == 0))
     , cacheLineSz_(p.ruby_system->getBlockSizeBytes())
+    , rnf_index_(p.rnf_index)
+    , rtl_src_id_(static_cast<uint16_t>(p.rtl_src_id))
 {
+    if (rnf_index_ > 0) {
+        // Segment was created by VIPController-0 just before us; open it now.
+        if (!shm_.tryOpen())
+            fatal("VIPController[%d]: could not open shm '%s' created by index 0\n",
+                  rnf_index_, p.shm_name.c_str());
+    }
 }
 
 void
 VIPController::init()
 {
     CHIGenericController::init();
-    // Kick the event loop immediately so we notice early q2g messages.
+
+    // Publish this RN-F's RTL NodeID into the shm header so questa_top_ipc
+    // can route incoming flits by src_id to the correct q2g slot.
+    auto* shm = shm_.layout();
+    if (shm) {
+        shm->rnf_nid[rnf_index_] = rtl_src_id_;
+        // Atomically advance num_rnf to at least rnf_index_+1.
+        uint32_t expected = shm->num_rnf.load(std::memory_order_relaxed);
+        uint32_t desired  = static_cast<uint32_t>(rnf_index_ + 1);
+        while (expected < desired &&
+               !shm->num_rnf.compare_exchange_weak(expected, desired,
+                   std::memory_order_release, std::memory_order_relaxed))
+            {}
+        fprintf(stderr, "[VIP:%d] init: rtl_src_id=%u num_rnf=%u\n",
+                rnf_index_, rtl_src_id_,
+                shm->num_rnf.load(std::memory_order_relaxed));
+    }
+
     scheduleEvent(Cycles(1));
 }
 
@@ -65,6 +92,10 @@ VIPController::wakeup()
     Tick ct = curTick();
     Tick lat1 = cyclesToTicks(Cycles(1));  // minimum non-zero latency
 
+    auto& my_q2g_rsp = shm->q2g_rsp[rnf_index_];
+    auto& my_q2g_req = shm->q2g_req[rnf_index_];
+    auto& my_q2g_dat = shm->q2g_dat[rnf_index_];
+
     // Drain q2g_rsp FIRST → rspOut
     // Must precede q2g_req: CompAck uses txnid_to_addr_ to recover the HNF
     // TBE address.  If q2g_req is drained first, a new request with the same
@@ -72,7 +103,7 @@ VIPController::wakeup()
     // correct TBE, causing an Invalid Transition panic in the HNF.
     {
         chi_ipc::ChiIpcRsp ipc;
-        while (shm->q2g_rsp.pop(ipc)) {
+        while (my_q2g_rsp.pop(ipc)) {
             auto msg = makeRspMsg(ipc);
             if (rspOut->areNSlotsAvailable(1, ct))
                 rspOut->enqueue(msg, ct, lat1, false, false);
@@ -83,7 +114,7 @@ VIPController::wakeup()
     // Drain q2g_req → pendingReqs_ (never drop; always buffer)
     {
         chi_ipc::ChiIpcReq ipc;
-        while (shm->q2g_req.pop(ipc)) {
+        while (my_q2g_req.pop(ipc)) {
             if (ipc.opcode == 0) continue;  // ReqLCrdReturn, not a transaction
             pendingReqs_.push(makeReqMsg(ipc));
             pending = true;
@@ -103,7 +134,7 @@ VIPController::wakeup()
     // number of CHIDataMsgs the HN-F expects per cache line; split accordingly.
     {
         chi_ipc::ChiIpcDat ipc;
-        while (shm->q2g_dat.pop(ipc)) {
+        while (my_q2g_dat.pop(ipc)) {
             // Check for tohost write: CVA6 test writes 1=PASS or FAIL code
             // to 0x80040000 to signal test completion.
             {
@@ -181,9 +212,9 @@ VIPController::wakeup()
     // CPUs to keep the event queue alive in standalone (Questa-only) mode.
     // Poll at 1-cycle granularity when there is pending work, otherwise back
     // off to 1000 cycles to reduce overhead during Questa inter-transaction gaps.
-    bool q2g_nonempty = !shm->q2g_req.empty() ||
-                        !shm->q2g_rsp.empty() ||
-                        !shm->q2g_dat.empty();
+    bool q2g_nonempty = !my_q2g_req.empty() ||
+                        !my_q2g_rsp.empty() ||
+                        !my_q2g_dat.empty();
     scheduleEvent(pending || q2g_nonempty ? Cycles(1) : Cycles(1000));
 }
 
@@ -268,8 +299,8 @@ VIPController::makeReqMsg(const chi_ipc::ChiIpcReq& m)
     auto msg = std::make_shared<CHIRequestMsg>(t, cacheLineSz_, m_ruby_system);
     Addr addr = static_cast<Addr>(m.addr);
     Addr lineAddr = addr & ~(Addr)(cacheLineSz_ - 1);
-    fprintf(stderr, "[VIP] makeReqMsg op=0x%02x txn=0x%03x addr=0x%lx lineAddr=0x%lx src=%u\n",
-            (unsigned)m.opcode, (unsigned)m.txn_id,
+    fprintf(stderr, "[VIP:%d] makeReqMsg op=0x%02x txn=0x%03x addr=0x%lx lineAddr=0x%lx src=%u\n",
+            rnf_index_, (unsigned)m.opcode, (unsigned)m.txn_id,
             (unsigned long)addr, (unsigned long)lineAddr, (unsigned)m.src_id);
     msg->setaddr(lineAddr);
     msg->setaccAddr(addr);
@@ -285,10 +316,6 @@ VIPController::makeReqMsg(const chi_ipc::ChiIpcReq& m)
     // Track txnId→addr so makeDatMsg can set the correct address on
     // write-data messages (NCBWrData DAT flits carry no address field).
     txnid_to_addr_[m.txn_id] = lineAddr;
-
-    // Track txnId→RTL SRCID so packDat/packRsp can set tgt_id to the actual
-    // CHI node ID in the RTL rather than gem5's internal MachineID.num.
-    txnid_to_rtl_src_[m.txn_id] = static_cast<uint16_t>(m.src_id);
 
     // Track txnId→original byte address for CCID computation in packDat.
     // gem5 SLICC always emits CCID=0 in CHIDataMsg; we reconstruct the correct
@@ -537,12 +564,7 @@ VIPController::packRsp(const CHIResponseMsg* msg)
         m.txn_id = (tid == 0 && m.db_id != 0) ? m.db_id : tid;
     }
     m.src_id  = static_cast<uint16_t>(msg->getresponder().num);
-    {
-        auto it = txnid_to_rtl_src_.find(m.txn_id);
-        m.tgt_id = (it != txnid_to_rtl_src_.end())
-                 ? it->second
-                 : static_cast<uint16_t>(msg->getDestination().smallestElement().num);
-    }
+    m.tgt_id  = rtl_src_id_;
     m.qos     = 0;
 
     // Map CHIResponseType → RTL CHI-B opcode + resp (chie_defines.v values).
@@ -586,15 +608,7 @@ VIPController::packDat(const CHIDataMsg* msg, int beatSz)
     m.addr      = static_cast<uint64_t>(msg->getaddr());
     m.txn_id    = static_cast<uint8_t>(msg->gettxnId());
     m.src_id    = static_cast<uint16_t>(msg->getresponder().num);
-    // Use the original RTL SRCID w(stored when the REQ as forwarded) as tgt_id
-    // so the ICN routes CompData to the correct CHI node.  gem5's MachineID.num
-    // may differ from the RTL node ID assigned in the SV testbench.
-    {
-        auto it = txnid_to_rtl_src_.find(m.txn_id);
-        m.tgt_id = (it != txnid_to_rtl_src_.end())
-                 ? it->second
-                 : static_cast<uint16_t>(msg->getDestination().smallestElement().num);
-    }
+    m.tgt_id    = rtl_src_id_;
     m.home_n_id = static_cast<uint16_t>(msg->getresponder().num);
     m.qos       = 0;
     // Echo the original request TXNID as DBID so the DUT can return it in
@@ -682,6 +696,7 @@ VIPController::packSnp(const CHIRequestMsg* msg)
     m.addr             = static_cast<uint64_t>(msg->getaddr());
     m.txn_id           = static_cast<uint8_t>(msg->gettxnId());
     m.src_id           = static_cast<uint16_t>(msg->getrequestor().num);
+    m.tgt_id           = rtl_src_id_;
     m.fwd_n_id         = static_cast<uint16_t>(msg->getfwdRequestor().num);
     m.qos              = 0;
     m.ns               = 0;
