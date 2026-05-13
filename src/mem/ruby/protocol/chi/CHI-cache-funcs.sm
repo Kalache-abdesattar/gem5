@@ -852,8 +852,8 @@ bool upstreamHasShared(State state) {
 }
 
 void printTBEState(TBE tbe) {
-  DPRINTF(RubySlicc, "STATE: addr: %#x opcode={%#x, %d}, SrcID=%s, data present=%d valid=%d unique=%d dirty=%d mu_dirty=%d dir ownerV=%d ownerE=%d sharers=%d tobe_I=%d tobe_SC=%d doFill=%d pendAction=%s txnId=%d\n",
-                      tbe.addr, tbe.opcode, tbe.opcode, tbe.requestor, tbe.dataBlkValid.isFull(), tbe.dataValid, tbe.dataUnique,
+  DPRINTF(RubySlicc, "STATE: addr: %#x accAddr: %#x opcode={%#x, %d}, SrcID=%s, data present=%d valid=%d unique=%d dirty=%d mu_dirty=%d dir ownerV=%d ownerE=%d sharers=%d tobe_I=%d tobe_SC=%d doFill=%d pendAction=%s txnId=%d\n",
+                      tbe.addr, tbe.accAddr, tbe.opcode, tbe.opcode, tbe.requestor, tbe.dataBlkValid.isFull(), tbe.dataValid, tbe.dataUnique,
                       tbe.dataDirty, tbe.dataMaybeDirtyUpstream, tbe.dir_ownerExists,
                       tbe.dir_ownerIsExcl,tbe.dir_sharers.count(),
                       tbe.dataToBeInvalid, tbe.dataToBeSharedClean,

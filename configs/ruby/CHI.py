@@ -248,6 +248,9 @@ def create_system(
             from config.chi.nodes.vip_requestor import VIPRequestorCoSim
             vip_rnf_src_ids = getattr(system, '_vip_rnf_src_ids',
                                       list(range(len(vip_shm_names))))
+            # RTL HNF_NID_PARAM = CORE_COUNT = number of RN-Fs.  Stored on the
+            # system object so chi_hnf_only.py can override it if needed.
+            rtl_hnf_nid = getattr(system, '_vip_rtl_hnf_nid', len(vip_shm_names))
             for i, shm_name in enumerate(vip_shm_names):
                 rtl_src_id = vip_rnf_src_ids[i] if i < len(vip_rnf_src_ids) else i
                 vip = VIPRequestorCoSim(
@@ -257,13 +260,15 @@ def create_system(
                     shm_name=shm_name,
                     rnf_index=i,
                     rtl_src_id=rtl_src_id,
+                    rtl_hnf_nid=rtl_hnf_nid,
                 )
                 vip.downstream_destinations = hnf_dests
                 network_cntrls.append(vip)
                 all_cntrls.append(vip)
                 system._vip_nodes.append(vip)
                 print(f"[CHI] VIPController added: version={vip.version}"
-                      f" shm='{shm_name}' rnf_index={i} rtl_src_id={rtl_src_id}")
+                      f" shm='{shm_name}' rnf_index={i} rtl_src_id={rtl_src_id}"
+                      f" rtl_hnf_nid={rtl_hnf_nid}")
         except Exception as e:
             import traceback
             print(f"[CHI] Warning: VIPController not available: {e}")

@@ -64,6 +64,7 @@ class VIPController : public CHIGenericController
     const int             cacheLineSz_;
     const int             rnf_index_;    // which q2g slot this VIP reads from
     const uint16_t        rtl_src_id_;  // RTL CHI NodeID of the RN-F we proxy
+    const uint16_t        rtl_hnf_nid_; // RTL CHI NodeID of the HN-F (SRCID/HOMENID in outbound flits)
 
     // Staging queue for inbound requests: q2g_req is always drained into this
     // buffer; each wakeup() then flushes as many entries as reqOut can accept.
@@ -80,6 +81,19 @@ class VIPController : public CHIGenericController
     // aligned).  Used in packDat to compute CCID correctly: gem5 SLICC always
     // emits CCID=0 in CHIDataMsg; we must reconstruct it from the request addr.
     std::unordered_map<uint16_t, Addr> txnid_to_acc_addr_;
+
+    // Maps txnId → RTL SrcID of the original requester.  In multi-core RTL
+    // designs (CORE_COUNT>1) each core has a different CHI NodeID; the ICN
+    // routes inbound dat/rsp flits to the correct per-core RXDAT/RXRSP channel
+    // based on TgtID.  Populated in makeReqMsg; used in packDat / packRsp so
+    // CompData and Comp are delivered to the right core.
+    std::unordered_map<uint16_t, uint16_t> txnid_to_src_id_;
+
+    // Maps snoop TxnId → snoop cache-line address.  Populated in packSnp so
+    // makeDatMsg can recover the correct address for SnpRespData/SnpRespDataPtl
+    // flits (DAT flits carry no address; the txnId is the HN-F's snoop TxnId,
+    // not a requestor write TxnId tracked by txnid_to_addr_).
+    std::unordered_map<uint16_t, Addr> snp_txnid_to_addr_;
 
     // Snapshot of the most-recent complete cache-line data sent to the RTL,
     // keyed by cache-line-aligned address.  Used in makeDatMsg to reconstruct

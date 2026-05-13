@@ -37,3 +37,9 @@ class VIPController(CHIGenericController):
     # can route incoming flits by src_id to the correct q2g slot.
     rtl_src_id = Param.Int(0,
         "RTL CHI NodeID of the RN-F this controller proxies")
+
+    # RTL CHI NodeID of the Home Node (HN-F).
+    # Used as SRCID and HOMENID in outbound DAT flits and SRCID in outbound RSP
+    # flits so the RTL RN-F sees the expected home node ID (HNF_NID_PARAM).
+    rtl_hnf_nid = Param.UInt16(0,
+        "RTL CHI NodeID of the HN-F (used as SRCID/HOMENID in outbound flits)")

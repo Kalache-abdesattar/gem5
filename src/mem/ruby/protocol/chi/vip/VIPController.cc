@@ -41,6 +41,7 @@ VIPController::VIPController(const Params& p)
     , cacheLineSz_(p.ruby_system->getBlockSizeBytes())
     , rnf_index_(p.rnf_index)
     , rtl_src_id_(static_cast<uint16_t>(p.rtl_src_id))
+    , rtl_hnf_nid_(static_cast<uint16_t>(p.rtl_hnf_nid))
 {
     if (rnf_index_ > 0) {
         // Segment was created by VIPController-0 just before us; open it now.
@@ -322,6 +323,10 @@ VIPController::makeReqMsg(const chi_ipc::ChiIpcReq& m)
     // CCID from the request address (bits[5:4] = 16-byte chunk within 64B line).
     txnid_to_acc_addr_[m.txn_id] = addr;
 
+    // Track txnId→RTL SrcID so packDat/packRsp can set the correct TgtID.
+    // In multi-core RTL designs the ICN routes by TgtID to the per-core channel.
+    txnid_to_src_id_[m.txn_id] = static_cast<uint16_t>(m.src_id);
+
     // Always identify as this VIPController so responses route back here.
     msg->setrequestor(m_machineID);
     // Route to the HN-F responsible for the request address.
@@ -431,12 +436,20 @@ VIPController::makeDatMsg(const chi_ipc::ChiIpcDat& m, int beat, int beatSz)
     Tick t = curTick();
     auto msg = std::make_shared<CHIDataMsg>(t, cacheLineSz_, m_ruby_system);
 
-    // DAT flits (NCBWrData etc.) carry no address.  Recover it from the
-    // txnId→addr map populated when the original REQ was forwarded.
-    // The HN-F datInPort asserts !usesTxnId and dispatches by address.
-    auto it = txnid_to_addr_.find(m.txn_id);
-    Addr addr = (it != txnid_to_addr_.end()) ? it->second
-                                             : static_cast<Addr>(m.addr);
+    // DAT flits carry no address.  For snoop responses use the snoop TxnId map;
+    // for write responses use the write TxnId map.
+    Addr addr;
+    if (m.opcode == 0x1 || m.opcode == 0x5) {  // SnpRespData / SnpRespDataPtl
+        auto sit = snp_txnid_to_addr_.find(m.txn_id);
+        addr = (sit != snp_txnid_to_addr_.end()) ? sit->second
+                                                 : static_cast<Addr>(m.addr);
+        if (sit != snp_txnid_to_addr_.end())
+            snp_txnid_to_addr_.erase(sit);
+    } else {
+        auto it = txnid_to_addr_.find(m.txn_id);
+        addr = (it != txnid_to_addr_.end()) ? it->second
+                                            : static_cast<Addr>(m.addr);
+    }
     msg->setaddr(addr);
     msg->settxnId(static_cast<Addr>(m.txn_id));
     msg->setusesTxnId(false);  // datInPort asserts !usesTxnId; routes by addr
@@ -563,8 +576,11 @@ VIPController::packRsp(const CHIResponseMsg* msg)
         uint16_t tid = static_cast<uint16_t>(msg->gettxnId());
         m.txn_id = (tid == 0 && m.db_id != 0) ? m.db_id : tid;
     }
-    m.src_id  = static_cast<uint16_t>(msg->getresponder().num);
-    m.tgt_id  = rtl_src_id_;
+    m.src_id  = rtl_hnf_nid_;
+    {
+        auto it = txnid_to_src_id_.find(static_cast<uint16_t>(m.txn_id));
+        m.tgt_id = (it != txnid_to_src_id_.end()) ? it->second : rtl_src_id_;
+    }
     m.qos     = 0;
 
     // Map CHIResponseType → RTL CHI-B opcode + resp (chie_defines.v values).
@@ -607,9 +623,12 @@ VIPController::packDat(const CHIDataMsg* msg, int beatSz)
     chi_ipc::ChiIpcDat m{};
     m.addr      = static_cast<uint64_t>(msg->getaddr());
     m.txn_id    = static_cast<uint8_t>(msg->gettxnId());
-    m.src_id    = static_cast<uint16_t>(msg->getresponder().num);
-    m.tgt_id    = rtl_src_id_;
-    m.home_n_id = static_cast<uint16_t>(msg->getresponder().num);
+    m.src_id    = rtl_hnf_nid_;
+    {
+        auto it = txnid_to_src_id_.find(static_cast<uint16_t>(m.txn_id));
+        m.tgt_id = (it != txnid_to_src_id_.end()) ? it->second : rtl_src_id_;
+    }
+    m.home_n_id = rtl_hnf_nid_;
     m.qos       = 0;
     // Echo the original request TXNID as DBID so the DUT can return it in
     // CompAck TXNID.  The HN-F has no DBID field in CHIDataMsg, so we reuse
@@ -700,10 +719,11 @@ VIPController::packSnp(const CHIRequestMsg* msg)
     m.fwd_n_id         = static_cast<uint16_t>(msg->getfwdRequestor().num);
     m.qos              = 0;
     m.ns               = 0;
-    m.ret_to_src       = static_cast<uint8_t>(msg->getretToSrc());
+    m.ret_to_src       = 1;  // always request data; RTL RN-F may otherwise respond SnpResp_I
     m.do_not_goto_sd   = 0;
     m.do_not_data_pull = 0;
     m.opcode           = gem5ToSccSnp(msg->gettype());
+    snp_txnid_to_addr_[m.txn_id] = static_cast<Addr>(msg->getaddr());
     return m;
 }
 
