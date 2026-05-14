@@ -42,6 +42,7 @@ VIPController::VIPController(const Params& p)
     , rnf_index_(p.rnf_index)
     , rtl_src_id_(static_cast<uint16_t>(p.rtl_src_id))
     , rtl_hnf_nid_(static_cast<uint16_t>(p.rtl_hnf_nid))
+    , quantum_ps_(static_cast<uint64_t>(p.quantum_ps))
 {
     if (rnf_index_ > 0) {
         // Segment was created by VIPController-0 just before us; open it now.
@@ -68,9 +69,14 @@ VIPController::init()
                !shm->num_rnf.compare_exchange_weak(expected, desired,
                    std::memory_order_release, std::memory_order_relaxed))
             {}
-        fprintf(stderr, "[VIP:%d] init: rtl_src_id=%u num_rnf=%u\n",
+        // VIPController-0 owns the quantum_ps field; others must not overwrite.
+        if (rnf_index_ == 0)
+            shm->quantum_ps.store(quantum_ps_, std::memory_order_relaxed);
+
+        fprintf(stderr, "[VIP:%d] init: rtl_src_id=%u num_rnf=%u quantum_ps=%lu\n",
                 rnf_index_, rtl_src_id_,
-                shm->num_rnf.load(std::memory_order_relaxed));
+                shm->num_rnf.load(std::memory_order_relaxed),
+                (unsigned long)quantum_ps_);
     }
 
     scheduleEvent(Cycles(1));
@@ -204,19 +210,45 @@ VIPController::wakeup()
 
     // Update gem5 time marker for the Questa side.
     // gem5 Tick = 1 ps when using m5.ticks.setGlobalFrequency("1ps").
-    // For other frequencies: divide curTick() by the number of ticks per ps.
-    // Using curTick() directly in ps units (valid for 1 ps tick granularity).
-    shm->gem5_grant_ps.store(static_cast<uint64_t>(ct),
-                             std::memory_order_release);
+    uint64_t gem5_ps = static_cast<uint64_t>(ct);
+    shm->gem5_grant_ps.store(gem5_ps, std::memory_order_release);
 
-    // Always reschedule: Questa may push into q2g at any time and there are no
-    // CPUs to keep the event queue alive in standalone (Questa-only) mode.
-    // Poll at 1-cycle granularity when there is pending work, otherwise back
-    // off to 1000 cycles to reduce overhead during Questa inter-transaction gaps.
     bool q2g_nonempty = !my_q2g_req.empty() ||
                         !my_q2g_rsp.empty() ||
                         !my_q2g_dat.empty();
-    scheduleEvent(pending || q2g_nonempty ? Cycles(1) : Cycles(1000));
+
+    // ── Time-quantum barrier ─────────────────────────────────────────────────
+    // Publish next quantum boundary and don't run more than one quantum ahead
+    // of Questa.  No OS spin: if gem5 is ahead we reschedule at the point
+    // where Questa's quantum end will have caught up.
+    {
+        uint64_t Q = shm->quantum_ps.load(std::memory_order_relaxed);
+        if (Q == 0) Q = quantum_ps_;  // guard against uninitialised shm
+
+        // Next multiple of Q strictly beyond now.
+        uint64_t gem5_q_end = (gem5_ps / Q + 1) * Q;
+        shm->gem5_quantum_end_ps.store(gem5_q_end, std::memory_order_release);
+
+        uint64_t questa_q_end =
+            shm->questa_quantum_end_ps.load(std::memory_order_acquire);
+
+        // gem5 is more than one quantum ahead: yield until Questa catches up.
+        if (gem5_ps > questa_q_end + Q) {
+            // Reschedule at the tick where Questa's next quantum end will be
+            // within range.  Cap at curTick()+1 cycle to avoid stalling forever
+            // if Questa is not running.
+            Tick target = static_cast<Tick>(questa_q_end + Q);
+            if (target <= ct)
+                target = ct + cyclesToTicks(Cycles(1));
+            Tick delta = target - ct;
+            Cycles wait_cycles = ticksToCycles(delta);
+            if (wait_cycles == Cycles(0)) wait_cycles = Cycles(1);
+            scheduleEvent(wait_cycles);
+        } else {
+            // Within one quantum: normal polling schedule.
+            scheduleEvent(pending || q2g_nonempty ? Cycles(1) : Cycles(1000));
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

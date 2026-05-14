@@ -43,3 +43,10 @@ class VIPController(CHIGenericController):
     # flits so the RTL RN-F sees the expected home node ID (HNF_NID_PARAM).
     rtl_hnf_nid = Param.UInt16(0,
         "RTL CHI NodeID of the HN-F (used as SRCID/HOMENID in outbound flits)")
+
+    # Time-quantum size in picoseconds for the gem5 ↔ Questa barrier protocol.
+    # gem5 will not run more than one quantum ahead of Questa, and vice versa.
+    # Must be a multiple of the CHI link cycle period (default 1000 ps = 1 ns).
+    # Written into shm->quantum_ps at init so Questa can read the same value.
+    quantum_ps = Param.UInt64(10000,
+        "Co-simulation time-quantum size in ps (default 10 cycles = 10000 ps)")
