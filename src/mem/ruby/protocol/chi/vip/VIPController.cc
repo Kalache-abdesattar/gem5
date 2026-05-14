@@ -15,6 +15,7 @@
 #include "mem/ruby/protocol/chi/vip/VIPController.hh"
 
 #include <cstring>
+#include <unistd.h>
 
 #include "base/logging.hh"
 #include "sim/sim_exit.hh"
@@ -218,9 +219,9 @@ VIPController::wakeup()
                         !my_q2g_dat.empty();
 
     // ── Time-quantum barrier ─────────────────────────────────────────────────
-    // Publish next quantum boundary and don't run more than one quantum ahead
-    // of Questa.  No OS spin: if gem5 is ahead we reschedule at the point
-    // where Questa's quantum end will have caught up.
+    // Publish our quantum boundary then real-time spin until Questa is within
+    // one quantum of gem5.  Blocking here (wakeup() holds the event queue)
+    // prevents gem5 sim-time from advancing while Questa catches up.
     {
         uint64_t Q = shm->quantum_ps.load(std::memory_order_relaxed);
         if (Q == 0) Q = quantum_ps_;  // guard against uninitialised shm
@@ -229,26 +230,16 @@ VIPController::wakeup()
         uint64_t gem5_q_end = (gem5_ps / Q + 1) * Q;
         shm->gem5_quantum_end_ps.store(gem5_q_end, std::memory_order_release);
 
-        uint64_t questa_q_end =
-            shm->questa_quantum_end_ps.load(std::memory_order_acquire);
-
-        // gem5 is more than one quantum ahead: yield until Questa catches up.
-        if (gem5_ps > questa_q_end + Q) {
-            // Reschedule at the tick where Questa's next quantum end will be
-            // within range.  Cap at curTick()+1 cycle to avoid stalling forever
-            // if Questa is not running.
-            Tick target = static_cast<Tick>(questa_q_end + Q);
-            if (target <= ct)
-                target = ct + cyclesToTicks(Cycles(1));
-            Tick delta = target - ct;
-            Cycles wait_cycles = ticksToCycles(delta);
-            if (wait_cycles == Cycles(0)) wait_cycles = Cycles(1);
-            scheduleEvent(wait_cycles);
-        } else {
-            // Within one quantum: normal polling schedule.
-            scheduleEvent(pending || q2g_nonempty ? Cycles(1) : Cycles(1000));
+        // Real-time spin: block until Questa's quantum end is within one quantum
+        // of gem5's current time.  500 µs sleep keeps CPU use low while Questa
+        // is catching up (Questa sim-time advances ~1 ns/µs real-time).
+        while (gem5_ps >
+               shm->questa_quantum_end_ps.load(std::memory_order_acquire) + Q) {
+            usleep(500);
         }
     }
+
+    scheduleEvent(pending || q2g_nonempty ? Cycles(1) : Cycles(1000));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
