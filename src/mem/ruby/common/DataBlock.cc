@@ -263,30 +263,66 @@ void
 DataBlock::networkAtomicOp(int chiSubOp, const DataBlock& operand,
                             int byteOffset)
 {
-    int alignedOff = byteOffset & ~7;  // doubleword-aligned offset
-    uint64_t src = 0;
-    uint64_t dst = 0;
-    std::memcpy(&src, operand.getData(alignedOff, 8), sizeof(src));
-    std::memcpy(&dst, getData(alignedOff, 8), sizeof(dst));
+    // The CVA6 RTL places the atomic operand at the sub-word position within
+    // the FIRST 8 bytes of the NCBWrData flit (replicated across both 32-bit
+    // slots for .w accesses), not at byteOffset within the cache line.
+    // sub_off = byteOffset & 7 selects the correct 32-bit slot:
+    //   sub_off=0 → 8-byte-aligned access → 64-bit operation from operand[0..7]
+    //   sub_off=4 → .w in high slot → 32-bit operation from operand[4..7]
+    int sub_off = byteOffset & 7;
 
-    uint64_t result = dst;
-    switch (chiSubOp) {
-    case 0x28: case 0x30: result = dst + src; break;               // Add
-    case 0x29: case 0x31: result = dst & ~src; break;              // Clr
-    case 0x2a: case 0x32: result = dst ^ src; break;               // Eor
-    case 0x2b: case 0x33: result = dst | src; break;               // Set
-    case 0x2c: case 0x34:                                          // SMax
-        if (static_cast<int64_t>(src) > static_cast<int64_t>(dst)) result = src;
-        break;
-    case 0x2d: case 0x35:                                          // SMin
-        if (static_cast<int64_t>(src) < static_cast<int64_t>(dst)) result = src;
-        break;
-    case 0x2e: case 0x36: if (src > dst) result = src; break;     // UMax
-    case 0x2f: case 0x37: if (src < dst) result = src; break;     // UMin
-    case 0x38: result = src; break;                                // Swap
-    default:   break;                                              // no-op
+    if (sub_off != 0) {
+        // 32-bit access at a non-8-byte-aligned offset (e.g. amoadd.w at byte 52).
+        // Operand is in the high 32-bit slot (bytes 4-7) of the first 8 bytes.
+        uint32_t src32 = 0, dst32 = 0;
+        int word_off = byteOffset & ~3;
+        std::memcpy(&src32, operand.getData(sub_off, 4), sizeof(src32));
+        std::memcpy(&dst32, getData(word_off, 4), sizeof(dst32));
+        uint32_t result32 = dst32;
+        switch (chiSubOp) {
+        case 0x28: case 0x30: result32 = dst32 + src32; break;
+        case 0x29: case 0x31: result32 = dst32 & ~src32; break;
+        case 0x2a: case 0x32: result32 = dst32 ^ src32; break;
+        case 0x2b: case 0x33: result32 = dst32 | src32; break;
+        case 0x2c: case 0x34:
+            if (static_cast<int32_t>(src32) > static_cast<int32_t>(dst32))
+                result32 = src32;
+            break;
+        case 0x2d: case 0x35:
+            if (static_cast<int32_t>(src32) < static_cast<int32_t>(dst32))
+                result32 = src32;
+            break;
+        case 0x2e: case 0x36: if (src32 > dst32) result32 = src32; break;
+        case 0x2f: case 0x37: if (src32 < dst32) result32 = src32; break;
+        case 0x38: result32 = src32; break;
+        default: break;
+        }
+        setData(reinterpret_cast<const uint8_t*>(&result32), word_off, 4);
+    } else {
+        // 8-byte-aligned access: operand is in bytes 0-7 of the flit.
+        int alignedOff = byteOffset & ~7;
+        uint64_t src = 0, dst = 0;
+        std::memcpy(&src, operand.getData(0, 8), sizeof(src));
+        std::memcpy(&dst, getData(alignedOff, 8), sizeof(dst));
+        uint64_t result = dst;
+        switch (chiSubOp) {
+        case 0x28: case 0x30: result = dst + src; break;
+        case 0x29: case 0x31: result = dst & ~src; break;
+        case 0x2a: case 0x32: result = dst ^ src; break;
+        case 0x2b: case 0x33: result = dst | src; break;
+        case 0x2c: case 0x34:
+            if (static_cast<int64_t>(src) > static_cast<int64_t>(dst)) result = src;
+            break;
+        case 0x2d: case 0x35:
+            if (static_cast<int64_t>(src) < static_cast<int64_t>(dst)) result = src;
+            break;
+        case 0x2e: case 0x36: if (src > dst) result = src; break;
+        case 0x2f: case 0x37: if (src < dst) result = src; break;
+        case 0x38: result = src; break;
+        default: break;
+        }
+        setData(reinterpret_cast<const uint8_t*>(&result), alignedOff, 8);
     }
-    setData(reinterpret_cast<const uint8_t*>(&result), alignedOff, 8);
 }
 
 } // namespace ruby

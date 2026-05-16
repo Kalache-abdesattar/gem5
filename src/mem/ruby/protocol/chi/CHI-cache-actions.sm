@@ -2556,8 +2556,6 @@ action(UpdateDataState_FromADataResp, desc="") {
   if (is_HN && (tbe.expected_req_resp.hasReceivedData()) &&
       ((tbe.reqType == CHIRequestType:AtomicReturn) ||
        (tbe.reqType == CHIRequestType:AtomicNoReturn))) {
-    DPRINTF(RubySlicc, "Atomic before %s\n", tbe.dataBlk);
-
     tbe.oldDataBlk := tbe.dataBlk;
     if (tbe.chiAtomicSubOp != 0) {
       // Network atomic from external RN-F (e.g. VIPController): operand
@@ -2571,8 +2569,6 @@ action(UpdateDataState_FromADataResp, desc="") {
       tbe.dataBlk.clearAtomicLogEntries();
     }
     tbe.dataDirty := true;
-
-    DPRINTF(RubySlicc, "Atomic after %s\n", tbe.dataBlk);
   } else if ((tbe.expected_req_resp.hasReceivedData()) &&
              ((tbe.reqType == CHIRequestType:AtomicReturn) ||
              (tbe.reqType == CHIRequestType:AtomicNoReturn))){

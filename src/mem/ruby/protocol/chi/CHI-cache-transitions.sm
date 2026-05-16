@@ -828,6 +828,19 @@ transition({UD_RSC, UC_RSC, SC_RSC, SD_RSC, UD, RU, RSD, RUSD, RUSC, UD_RSD, SD_
   ProcessNextState;
 }
 
+// The VIPController sends plain WriteBackPtl even when the RN-F was already
+// invalidated by a prior SnpUnique.  In states where no upstream exclusive
+// owner is tracked (UD, UC, SD, SC, I) a WriteBackPtl can only be stale:
+// route to the same stale handler so the HN-F sends CompDBIDResp_Stale and
+// the VIPController's stale_txnid_ mechanism downgrades CBWrData_UD_PD→I.
+transition({UD, UC, SD, SC, I},
+            {WriteBackPtl, WriteBackFull, WriteEvictFull, WriteCleanFull}, BUSY_BLKD) {
+  Initiate_Request_Stale;
+  Initiate_CopyBack_Stale;
+  Pop_ReqRdyQueue;
+  ProcessNextState;
+}
+
 // Cache Replacement
 
 // When in UD_RU,UC_RU,UD_RSD,SD_RSD we also just drop the line since an upstream
