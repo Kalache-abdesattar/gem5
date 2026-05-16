@@ -2813,8 +2813,7 @@ action(Receive_SnpResp, desc="") {
     tbe.dataBlk := cache_entry.DataBlk;
     tbe.dataBlkValid.fillMask();
     tbe.dataValid := true;
-    DPRINTF(RubySlicc, "Receive_SnpResp: using stale HN cache data for addr %#x "
-            "(WriteBack+SnpUnique collision)\n", address);
+    DPRINTF(RubySlicc, "Receive_SnpResp: WB+SnpUnique collision at %#x, using stale HN cache data\n", address);
   }
 }
 
