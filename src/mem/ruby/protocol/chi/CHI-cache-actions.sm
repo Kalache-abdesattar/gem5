@@ -2802,6 +2802,20 @@ action(Receive_SnpResp, desc="") {
     }
     assert(in_msg.stale == tbe.is_stale);
   }
+  // WriteBack+SnpUnique collision: the RTL responded with SnpResp_I (no data)
+  // while it had a concurrent WriteBackPtl in flight.  The dirty data is in
+  // the stalled WriteBack that will be processed after BUSY_BLKD clears.
+  // Use the HN-F's stale cache copy so Send_CompData_AR can proceed.
+  // This is safe when the WriteBack's dirty bytes do not overlap the atomic
+  // target bytes (as is the case in the spinlock tests: counter at offset 4,
+  // lock at offset 0x34).
+  if (tbe.dataValid == false && is_valid(cache_entry)) {
+    tbe.dataBlk := cache_entry.DataBlk;
+    tbe.dataBlkValid.fillMask();
+    tbe.dataValid := true;
+    DPRINTF(RubySlicc, "Receive_SnpResp: using stale HN cache data for addr %#x "
+            "(WriteBack+SnpUnique collision)\n", address);
+  }
 }
 
 action(Receive_RetryAck, desc="") {

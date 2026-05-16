@@ -1037,9 +1037,11 @@ void setExpectedForInvSnoop(TBE tbe, bool expectCleanWB) {
   if (tbe.dataMaybeDirtyUpstream) {
     assert(tbe.dir_ownerExists);
     tbe.expected_snp_resp.addExpectedDataType(CHIDataType:SnpRespData_I_PD);
-    if ((expectCleanWB == false) || (tbe.dir_sharers.count() > 1)) {
-      tbe.expected_snp_resp.addExpectedRespType(CHIResponseType:SnpResp_I);
-    }
+    // Always accept SnpResp_I: the RTL may respond with no-data when it has a
+    // concurrent WriteBackPtl in flight (CHI WriteBack+SnpUnique collision).
+    // In that case the dirty data arrives later via the stalled WriteBack; we
+    // fall back to the HN-F's stale cache copy in Receive_SnpResp.
+    tbe.expected_snp_resp.addExpectedRespType(CHIResponseType:SnpResp_I);
   } else {
     tbe.expected_snp_resp.addExpectedRespType(CHIResponseType:SnpResp_I);
   }
