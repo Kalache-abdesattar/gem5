@@ -506,7 +506,13 @@ transition({I,SC,SC_RSC,SD,SD_RSD,SD_RSC,RSD,RUSD,RUSC,
   ProcessNextState;
 }
 
-transition({UD,UD_RU,UD_RSD,UD_RSC,UC,UC_RU,UC_RSC},
+// AtomicReturn/NoReturn served from HN cache — data locally available.
+// UD_RU / UC_RU are excluded: data may be dirty with an upstream exclusive
+// owner (dataMaybeDirtyUpstream=true → copyCacheAndDir clears tbe.dataValid),
+// so Profile_Hit's assert(tbe.dataValid) would fire.  Those states use the
+// separate Profile_Miss transitions below, matching the WriteUnique split at
+// lines ~418-436.
+transition({UD,UD_RSD,UD_RSC,UC,UC_RSC},
            {AtomicReturn_PoC_Alloc, AtomicReturn_PoC}, BUSY_BLKD) {
   Initiate_Request;
   Initiate_AtomicReturn_LocalWrite;
@@ -515,11 +521,31 @@ transition({UD,UD_RU,UD_RSD,UD_RSC,UC,UC_RU,UC_RSC},
   ProcessNextState;
 }
 
-transition({UD,UD_RU,UD_RSD,UD_RSC,UC,UC_RU,UC_RSC},
+// UD_RU / UC_RU: exclusive owner upstream may hold dirty data; HN must snoop
+// before it can perform the atomic.  Counts as a miss for profiling.
+transition({UD_RU,UC_RU},
+           {AtomicReturn_PoC_Alloc, AtomicReturn_PoC}, BUSY_BLKD) {
+  Initiate_Request;
+  Initiate_AtomicReturn_LocalWrite;
+  Profile_Miss;
+  Pop_ReqRdyQueue;
+  ProcessNextState;
+}
+
+transition({UD,UD_RSD,UD_RSC,UC,UC_RSC},
            {AtomicNoReturn_PoC_Alloc, AtomicNoReturn_PoC}, BUSY_BLKD) {
   Initiate_Request;
   Initiate_AtomicNoReturn_LocalWrite;
   Profile_Hit;
+  Pop_ReqRdyQueue;
+  ProcessNextState;
+}
+
+transition({UD_RU,UC_RU},
+           {AtomicNoReturn_PoC_Alloc, AtomicNoReturn_PoC}, BUSY_BLKD) {
+  Initiate_Request;
+  Initiate_AtomicNoReturn_LocalWrite;
+  Profile_Miss;
   Pop_ReqRdyQueue;
   ProcessNextState;
 }

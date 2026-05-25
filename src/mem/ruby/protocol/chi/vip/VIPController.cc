@@ -230,13 +230,13 @@ VIPController::recvResponseMsg(const CHIResponseMsg* msg)
     if (!shm) return true;
 
     auto ipc = packRsp(msg);
-    fprintf(stderr, "[VIP] recvResponseMsg type=%d txnId=%lu dbid=%lu → ipc op=0x%02x txn=0x%03x\n",
-            (int)msg->gettype(), (unsigned long)msg->gettxnId(),
-            (unsigned long)msg->getdbid(),
+    fprintf(stderr, "[VIP:%d] recvResponseMsg type=%d txnId=%lu dbid=%lu stale=%d → ipc op=0x%02x txn=0x%03x\n",
+            rnf_index_, (int)msg->gettype(), (unsigned long)msg->gettxnId(),
+            (unsigned long)msg->getdbid(), (int)msg->getstale(),
             (unsigned)ipc.opcode, (unsigned)ipc.txn_id);
     if (!shm->g2q_rsp.push(ipc)) {
-        fprintf(stderr, "[VIP] recvResponseMsg: g2q_rsp FULL — retry op=0x%02x txn=0x%03x\n",
-                (unsigned)ipc.opcode, (unsigned)ipc.txn_id);
+        fprintf(stderr, "[VIP:%d] recvResponseMsg: g2q_rsp FULL — retry op=0x%02x txn=0x%03x\n",
+                rnf_index_, (unsigned)ipc.opcode, (unsigned)ipc.txn_id);
         return false;  // retry next cycle
     }
     return true;
@@ -358,15 +358,16 @@ VIPController::makeRspMsg(const chi_ipc::ChiIpcRsp& m)
         // an address → no TBE at that address → state I → panic.
         msg->setusesTxnId(false);
         {
-            auto it = txnid_to_addr_.find(m.txn_id);
-            if (it != txnid_to_addr_.end()) {
+            auto it = snp_txnid_to_addr_.find(m.txn_id);
+            if (it != snp_txnid_to_addr_.end()) {
                 msg->setaddr(it->second);
+                snp_txnid_to_addr_.erase(it);
                 fprintf(stderr, "[VIP] SnpResp txn=0x%03x resp=0x%02x → addr=0x%lx\n",
                         (unsigned)m.txn_id, (unsigned)m.resp,
-                        (unsigned long)it->second);
+                        (unsigned long)msg->getaddr());
             } else {
-                fprintf(stderr, "[VIP] SnpResp txn=0x%03x → NO ADDR in txnid_to_addr_ (size=%zu)\n",
-                        (unsigned)m.txn_id, txnid_to_addr_.size());
+                fprintf(stderr, "[VIP] SnpResp txn=0x%03x → NO ADDR in snp_txnid_to_addr_ (size=%zu)\n",
+                        (unsigned)m.txn_id, snp_txnid_to_addr_.size());
             }
         }
         break;
@@ -374,9 +375,11 @@ VIPController::makeRspMsg(const chi_ipc::ChiIpcRsp& m)
         msg->settype(CHIResponseType_SnpResp_I);
         msg->setusesTxnId(false);
         {
-            auto it = txnid_to_addr_.find(m.txn_id);
-            if (it != txnid_to_addr_.end())
+            auto it = snp_txnid_to_addr_.find(m.txn_id);
+            if (it != snp_txnid_to_addr_.end()) {
                 msg->setaddr(it->second);
+                snp_txnid_to_addr_.erase(it);
+            }
         }
         break;
     case 0x02: // CompAck
@@ -529,9 +532,9 @@ VIPController::makeDatMsg(const chi_ipc::ChiIpcDat& m, int beat, int beatSz)
     int n = std::min(beatSz, cacheLineSz_ - offset);
     if (n > 0) {
         msg->getdataBlk().setData(m.data + offset, offset, n);
-        fprintf(stderr, "[VIP] makeDatMsg opcode=0x%02x resp=0x%02x txn=0x%03x addr=0x%lx beat=%d "
+        fprintf(stderr, "[VIP:%d] makeDatMsg opcode=0x%02x resp=0x%02x txn=0x%03x addr=0x%lx beat=%d "
                 "offset=%d data[off]=0x%02x data[off+1]=0x%02x\n",
-                m.opcode, m.resp,
+                rnf_index_, m.opcode, m.resp,
                 m.txn_id, static_cast<unsigned long>(addr), beat, offset,
                 m.data[offset], (n > 1 ? m.data[offset + 1] : 0));
     }
@@ -564,8 +567,8 @@ VIPController::makeDatMsg(const chi_ipc::ChiIpcDat& m, int beat, int beatSz)
             if (!any) mask.setMask(offset, n);  // no BE info — treat beat as fully valid
         }
         msg->setbitMask(mask);
-        fprintf(stderr, "[VIP] makeDatMsg txn=0x%03x beat=%d bitMask.count=%d\n",
-                m.txn_id, beat, mask.count());
+        fprintf(stderr, "[VIP:%d] makeDatMsg txn=0x%03x beat=%d bitMask.count=%d\n",
+                rnf_index_, m.txn_id, beat, mask.count());
     }
     msg->setresponder(m_machineID);
     // Route to HN-F by address.
@@ -596,6 +599,15 @@ VIPController::packRsp(const CHIResponseMsg* msg)
         m.tgt_id = (it != txnid_to_src_id_.end()) ? it->second : rtl_src_id_;
     }
     m.qos     = 0;
+
+    // If this is a stale CompDBIDResp, record the txn_id so makeDatMsg can
+    // downgrade the RTL's CBWrData_UD_PD to CBWrData_I (HN-F expects I/SC for
+    // stale writebacks from Initiate_CopyBack_Stale).
+    if (msg->getstale()) {
+        stale_txnid_.insert(m.txn_id);
+        fprintf(stderr, "[VIP:%d] packRsp: stale CompDBIDResp txn=0x%03x → marking stale\n",
+                rnf_index_, (unsigned)m.txn_id);
+    }
 
     // Map CHIResponseType → RTL CHI-B opcode + resp (chie_defines.v values).
     switch (msg->gettype()) {
