@@ -806,7 +806,7 @@ transition({UD, UD_RSC, SD_RSC, UC_RSC, SC_RSC, UD_RU, UC_RU, UD_RSD, SD_RSD, RU
 
 // WriteBack from upstream
 
-transition({UD_RU, UC_RU, RU, UD_RSD, SD_RSD, RSD, RUSD}, {WriteBackPtl, WriteBackFull, WriteCleanFull}, BUSY_BLKD) {
+transition({RU, UD_RSD, SD_RSD, RSD, RUSD}, {WriteBackPtl, WriteBackFull, WriteCleanFull}, BUSY_BLKD) {
   Initiate_Request;
   Initiate_CopyBack;
   Pop_ReqRdyQueue;
@@ -832,9 +832,25 @@ transition({UD_RSC, UC_RSC, SC_RSC, SD_RSC, UD, RU, RSD, RUSD, RUSC, UD_RSD, SD_
 // invalidated by a prior SnpUnique.  In states where no upstream exclusive
 // owner is tracked (UD, UC, SD, SC, I) a WriteBackPtl can only be stale:
 // route to the same stale handler so the HN-F sends CompDBIDResp_Stale and
-// the VIPController's stale_txnid_ mechanism downgrades CBWrData_UD_PD→I.
+// the VIPController's stale_dbids_ mechanism downgrades CBWrData_UD_PD→I.
 transition({UD, UC, SD, SC, I},
             {WriteBackPtl, WriteBackFull, WriteEvictFull, WriteCleanFull}, BUSY_BLKD) {
+  Initiate_Request_Stale;
+  Initiate_CopyBack_Stale;
+  Pop_ReqRdyQueue;
+  ProcessNextState;
+}
+
+// CVA6 RTL sends both SnpRespData_I_PD (correct) and WriteBackPtl (buggy
+// duplicate) after receiving SnpUnique.  In UD_RU/UC_RU the HN-F has
+// already dispatched SnpUnique; the authoritative dirty data arrives via
+// SnpRespData.  The concurrent WriteBackPtl is stale and must be dropped:
+// if accepted, its stale lock value overwrites the cache line before
+// networkAtomicOp reads the old value, causing CompData to return lock=1
+// on every AtomicSwap → spinlock_tas livelock.
+// WriteEvictFull in UD_RU/UC_RU is handled separately above (non-stale).
+transition({UD_RU, UC_RU},
+            {WriteBackPtl, WriteBackFull, WriteCleanFull}, BUSY_BLKD) {
   Initiate_Request_Stale;
   Initiate_CopyBack_Stale;
   Pop_ReqRdyQueue;
