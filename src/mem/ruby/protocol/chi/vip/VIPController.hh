@@ -30,6 +30,7 @@
 #include <queue>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "mem/ruby/protocol/chi/generic/CHIGenericController.hh"
 #include "mem/ruby/protocol/CHI/CHIDataType.hh"
@@ -95,6 +96,10 @@ class VIPController : public CHIGenericController
     // not a requestor write TxnId tracked by txnid_to_addr_).
     std::unordered_map<uint16_t, Addr> snp_txnid_to_addr_;
 
+    // DBIDs for which gem5 sent CompDBIDRespStale.  The CVA6 RTL incorrectly
+    // sends CBWrData_UD_PD even for stale CopyBack writes; we force it to
+    // CBWrData_I in makeDatMsg when the DBID is present here.
+    std::unordered_set<uint16_t> stale_dbids_;
     // Snapshot of the most-recent complete cache-line data sent to the RTL,
     // keyed by cache-line-aligned address.  Used in makeDatMsg to reconstruct
     // the full line when the RTL returns a SnpRespDataPtl (partially dirty):
