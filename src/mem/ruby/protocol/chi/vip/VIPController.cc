@@ -600,15 +600,6 @@ VIPController::packRsp(const CHIResponseMsg* msg)
     }
     m.qos     = 0;
 
-    // If this is a stale CompDBIDResp, record the txn_id so makeDatMsg can
-    // downgrade the RTL's CBWrData_UD_PD to CBWrData_I (HN-F expects I/SC for
-    // stale writebacks from Initiate_CopyBack_Stale).
-    if (msg->getstale()) {
-        stale_txnid_.insert(m.txn_id);
-        fprintf(stderr, "[VIP:%d] packRsp: stale CompDBIDResp txn=0x%03x → marking stale\n",
-                rnf_index_, (unsigned)m.txn_id);
-    }
-
     // Map CHIResponseType → RTL CHI-B opcode + resp (chie_defines.v values).
     switch (msg->gettype()) {
     case CHIResponseType_Comp_I:       m.opcode=0x04; m.resp=0; break;
