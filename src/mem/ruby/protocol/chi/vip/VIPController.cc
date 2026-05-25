@@ -106,7 +106,7 @@ VIPController::wakeup()
         chi_ipc::ChiIpcRsp ipc;
         while (my_q2g_rsp.pop(ipc)) {
             auto msg = makeRspMsg(ipc);
-            if (rspOut->areNSlotsAvailable(1, ct))
+            if (msg && rspOut->areNSlotsAvailable(1, ct))
                 rspOut->enqueue(msg, ct, lat1, false, false);
             pending = true;
         }
@@ -366,8 +366,13 @@ VIPController::makeRspMsg(const chi_ipc::ChiIpcRsp& m)
                         (unsigned)m.txn_id, (unsigned)m.resp,
                         (unsigned long)msg->getaddr());
             } else {
-                fprintf(stderr, "[VIP] SnpResp txn=0x%03x → NO ADDR in snp_txnid_to_addr_ (size=%zu)\n",
-                        (unsigned)m.txn_id, snp_txnid_to_addr_.size());
+                // CVA6 RTL dual-response bug: RTL sends both SnpRespData_I_PD
+                // (TXDAT) and SnpResp_I (TXRSP) for the same snoop.  makeDatMsg
+                // already consumed and erased the snp_txnid_to_addr_ entry.
+                // Drop this stray RSP flit; wakeup() null-checks the return value.
+                fprintf(stderr, "[VIP] SnpResp txn=0x%03x → stray (SnpRespData already processed), dropping\n",
+                        (unsigned)m.txn_id);
+                return nullptr;
             }
         }
         break;

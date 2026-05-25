@@ -1606,11 +1606,11 @@ transition(BUSY_BLKD,
 }
 
 // CVA6 RTL may deliver a SnpResp_I in response to a SnpClean issued during
-// SD_RSC processing (WriteBack+SnpClean collision): the RTL invalidates its
-// copy instead of downgrading to SC because it has a WriteBack in flight.
-// The machine can be back in SD_RSC (not BUSY_BLKD) when the response arrives.
-// Handle it identically to the BUSY_BLKD case above.
-transition(SD_RSC, {SnpResp_I, SnpResp_SC}) {
+// any RSC-family state (WriteBack+SnpClean collision): the RTL invalidates
+// instead of downgrading because it has a WriteBack in flight.  The machine
+// can be back in the RSC state (not BUSY_BLKD) when the response arrives.
+// Handle identically to the BUSY_BLKD case above.
+transition({SD_RSC, UC_RSC, UD_RSC, SC_RSC}, {SnpResp_I, SnpResp_SC}) {
   Receive_SnpResp;
   UpdateDirState_FromSnpResp;
   Pop_RespInQueue;
