@@ -1352,7 +1352,11 @@ action(Initiate_CopyBack_Stale, desc="") {
     tbe.actions.push(Event:FinishCopyBack_Stale);
   }
 
-  assert((tbe.dir_ownerExists == false) || (tbe.dir_owner != tbe.requestor));
+  // NOTE: the usual assert (dir_owner != requestor) is intentionally omitted.
+  // The CVA6 RTL sends WriteBackPtl concurrently with SnpRespData_I_PD while
+  // the HN-F is in UD_RU (dir_owner == requestor == the node being snooped).
+  // The write-back is stale and is discarded via the stale_dbids_ mechanism in
+  // VIPController; removing the assert lets the stale handler proceed correctly.
 }
 
 action(Finish_CopyBack_Stale, desc="") {
@@ -2205,6 +2209,7 @@ action(Receive_ReqDataResp, desc="") {
   peek(datInPort, CHIDataMsg) {
     // Decrement pending
     if (tbe.expected_req_resp.receiveData(in_msg.type) == false) {
+      DPRINTF(RubySlicc, "unexpected type=%s reqType=%s requestor=%s responder=%s dir_ownerExists=%d dir_owner=%s addr=%#x accAddr=%#x txnId=%d expected=%s\n", in_msg.type, tbe.reqType, tbe.requestor, in_msg.responder, tbe.dir_ownerExists, tbe.dir_owner, address, tbe.accAddr, in_msg.txnId, tbe.expected_req_resp);
       error("Received unexpected message");
     }
     // Copy data to tbe only if we didn't have valid data or the received

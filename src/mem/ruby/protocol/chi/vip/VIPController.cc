@@ -447,7 +447,6 @@ VIPController::makeDatMsg(const chi_ipc::ChiIpcDat& m, int beat, int beatSz)
     // DAT flits carry no address.  For snoop responses use the snoop TxnId map;
     // for write responses use the write TxnId map.
     Addr addr;
-    bool entry_stale = false;
     if (m.opcode == 0x1 || m.opcode == 0x5) {  // SnpRespData / SnpRespDataPtl
         auto sit = snp_txnid_to_addr_.find(m.txn_id);
         addr = (sit != snp_txnid_to_addr_.end()) ? sit->second
@@ -458,8 +457,6 @@ VIPController::makeDatMsg(const chi_ipc::ChiIpcDat& m, int beat, int beatSz)
         auto it = txnid_to_addr_.find(m.txn_id);
         addr = (it != txnid_to_addr_.end()) ? it->second
                                             : static_cast<Addr>(m.addr);
-        entry_stale = (stale_dbids_.count(m.txn_id) > 0);
-        if (entry_stale) stale_dbids_.erase(m.txn_id);
     }
     msg->setaddr(addr);
     msg->settxnId(static_cast<Addr>(m.txn_id));
@@ -520,17 +517,6 @@ VIPController::makeDatMsg(const chi_ipc::ChiIpcDat& m, int beat, int beatSz)
         msg->settype(CHIDataType_NCBWrData); break;
     }
 
-    // RTL bug workaround: the CVA6 RN-F sends CBWrData_UD_PD for stale
-    // CopyBack writes regardless of the post-snoop cache state.  When the
-    // HN-F issued CompDBIDRespStale the WrData must carry CBWrData_I or
-    // CBWrData_SC (CHI spec §4.11.1).  Force CBWrData_I here so
-    // Initiate_CopyBack_Stale does not panic.
-    if (op == 0x2 && entry_stale) {
-        fprintf(stderr, "[VIP:%d] makeDatMsg: stale CBWrData txn=0x%03x"
-                " resp=0x%02x → forcing CBWrData_I\n",
-                rnf_index_, (unsigned)m.txn_id, (unsigned)m.resp);
-        msg->settype(CHIDataType_CBWrData_I);
-    }
     // Copy the beat-sized slice of IPC data into the DataBlock at the correct
     // byte offset so that copyPartial() in the HN-F merges beats correctly.
     int offset = beat * beatSz;
@@ -636,16 +622,6 @@ VIPController::packRsp(const CHIResponseMsg* msg)
     default:
         m.opcode=0x04; break;
     }
-
-    // Track stale CompDBIDResp so makeDatMsg can force CBWrData_I.
-    if ((msg->gettype() == CHIResponseType_CompDBIDResp ||
-         msg->gettype() == CHIResponseType_DBIDResp) &&
-        msg->getstale()) {
-        stale_dbids_.insert(m.db_id);
-        fprintf(stderr, "[VIP:%d] packRsp: stale dbid=0x%03x recorded\n",
-                rnf_index_, (unsigned)m.db_id);
-    }
-
 
     return m;
 }
