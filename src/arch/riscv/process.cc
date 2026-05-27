@@ -253,9 +253,13 @@ RiscvProcess::argsInit(int pageSize)
         pushOntoStack(aux.val);
     }
 
-    ThreadContext *tc = system->threads[contextIds[0]];
-    tc->setReg(StackPointerReg, memState->getStackMin());
-    tc->pcState(getStartPC());
+    Addr sp_base = memState->getStackMin();
+    Addr start_pc = getStartPC();
+    for (int i = 0; i < (int)contextIds.size(); i++) {
+        ThreadContext *tc_i = system->threads[contextIds[i]];
+        tc_i->setReg(StackPointerReg, sp_base - i * 0x1000);
+        tc_i->pcState(start_pc);
+    }
 
     memState->setStackMin(roundDown(memState->getStackMin(), pageSize));
 }

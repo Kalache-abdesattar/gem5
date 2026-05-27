@@ -291,11 +291,11 @@ Process::initState()
     if (contextIds.empty())
         fatal("Process %s is not associated with any HW contexts!\n", name());
 
-    // first thread context for this process... initialize & enable
+    // Activate all thread contexts associated with this process so that
+    // every CPU sharing this address space starts ticking from _start.
+    for (int id : contextIds)
+        system->threads[id]->activate();
     ThreadContext *tc = system->threads[contextIds[0]];
-
-    // mark this context as active so it will start ticking.
-    tc->activate();
 
     pTable->initState();
 

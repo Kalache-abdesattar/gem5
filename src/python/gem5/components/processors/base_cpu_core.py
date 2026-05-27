@@ -72,12 +72,16 @@ class BaseCPUCore(AbstractCore):
 
     @overrides(AbstractCore)
     def requires_send_evicts(self) -> bool:
-        if self.get_isa() in (ISA.ARM, ISA.X86):
+        if self.get_isa() in (ISA.ARM, ISA.X86, ISA.RISCV):
             # * The x86 `mwait`` instruction is built on top of coherence,
             #   therefore evictions must be sent from cache to the CPU Core.
             #
-            # * The local exclusive monitor in ARM systems requires the sending
-            #    of evictions from cache to the CPU Core.
+            # * The local exclusive monitor in ARM/RISC-V systems requires the
+            #    sending of evictions from cache to the CPU Core so that a
+            #    snoop-induced eviction of a LR-monitored line clears the ISA
+            #    reservation before the SC fires.  Without this, the SC issues
+            #    a stale unconditional write (secondary type ST) that can roll
+            #    back g_shared below values written by concurrent SCs.
             return True
 
         # The O3 model must keep the LSQ coherent with the caches.
