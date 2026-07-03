@@ -853,7 +853,7 @@ transition({UD, UC, SD, SC, I},
 // the new exclusive owner (e.g., Hart 1 after receiving CompData), handled
 // below by the non-stale transition.
 transition({UD_RU, UC_RU},
-            {WriteBackPtl, WriteBackFull}, BUSY_BLKD) {
+            {WriteBackPtl}, BUSY_BLKD) {
   Initiate_Request_Stale;
   Initiate_CopyBack_Stale;
   Pop_ReqRdyQueue;
@@ -863,7 +863,7 @@ transition({UD_RU, UC_RU},
 // WriteCleanFull in UD_RU/UC_RU is a legitimate clean downgrade from the
 // exclusive owner after it received CompData.  Route to the normal CopyBack
 // handler (non-stale).
-transition({UD_RU, UC_RU}, WriteCleanFull, BUSY_BLKD) {
+transition({UD_RU, UC_RU}, {WriteCleanFull, WriteBackFull}, BUSY_BLKD) {
   Initiate_Request;
   Initiate_CopyBack;
   Pop_ReqRdyQueue;
