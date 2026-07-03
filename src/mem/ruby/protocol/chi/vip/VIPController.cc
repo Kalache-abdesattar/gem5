@@ -523,11 +523,14 @@ VIPController::makeDatMsg(const chi_ipc::ChiIpcDat& m, int beat, int beatSz)
     int n = std::min(beatSz, cacheLineSz_ - offset);
     if (n > 0) {
         msg->getdataBlk().setData(m.data + offset, offset, n);
-        fprintf(stderr, "[VIP:%d] makeDatMsg opcode=0x%02x resp=0x%02x txn=0x%03x addr=0x%lx beat=%d "
-                "offset=%d data[off]=0x%02x data[off+1]=0x%02x\n",
+        fprintf(stderr,
+                "[VIP:%d] makeDatMsg op=0x%02x resp=0x%02x txn=0x%03x"
+                " addr=0x%lx beat=%d off=%d"
+                " d[off]=0x%02x d[24..27]=0x%02x%02x%02x%02x\n",
                 rnf_index_, m.opcode, m.resp,
                 m.txn_id, static_cast<unsigned long>(addr), beat, offset,
-                m.data[offset], (n > 1 ? m.data[offset + 1] : 0));
+                m.data[offset],
+                m.data[24], m.data[25], m.data[26], m.data[27]);
     }
 
     // Build bitMask for this beat's byte range, intersected with IPC BE array.
@@ -708,11 +711,15 @@ VIPController::packDat(const CHIDataMsg* msg, int beatSz)
                 line.resize(cacheLineSz_, 0);
             memcpy(line.data() + offset, m.data, n);
         }
-        fprintf(stderr, "[VIP] packDat txn=0x%03x tgt=%u addr=0x%lx beat=%d "
-                "offset=%d n=%d data[0]=0x%02x data[32]=0x%02x\n",
+        fprintf(stderr,
+                "[VIP] packDat txn=0x%03x tgt=%u addr=0x%lx beat=%d"
+                " off=%d n=%d d[0]=0x%02x"
+                " d[24..27]=0x%02x%02x%02x%02x d[32]=0x%02x\n",
                 m.txn_id, (unsigned)m.tgt_id,
                 static_cast<unsigned long>(m.addr), beat, offset, n,
-                m.data[0], (n > 32 ? m.data[32] : 0));
+                m.data[0],
+                m.data[24], m.data[25], m.data[26], m.data[27],
+                (n > 32 ? m.data[32] : 0));
     }
     return m;
 }
@@ -728,7 +735,7 @@ VIPController::packSnp(const CHIRequestMsg* msg)
     m.fwd_n_id         = static_cast<uint16_t>(msg->getfwdRequestor().num);
     m.qos              = 0;
     m.ns               = 0;
-    m.ret_to_src       = 1;  // always request data; RTL RN-F may otherwise respond SnpResp_I
+    m.ret_to_src       = msg->getretToSrc() ? 1 : 0;
     m.do_not_goto_sd   = 0;
     m.do_not_data_pull = 0;
     m.opcode           = gem5ToSccSnp(msg->gettype());

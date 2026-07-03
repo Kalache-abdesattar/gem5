@@ -80,7 +80,7 @@ in_port(rspInPort, CHIResponseMsg, rspIn, rank=10,
     peek(rspInPort, CHIResponseMsg) {
 
       if(in_msg.addr == 0){
-        DPRINTF(ChiSlicc, 
+        DPRINTF(ChiSlicc,
           "[rspInPort][Receiver Node ID (version): %d] in_msg: type=%s addr=%#x responder=%d destination=%d \n",
           version, in_msg.type, in_msg.addr, in_msg.responder, in_msg.Destination);
       }
@@ -342,6 +342,13 @@ in_port(reqRdyPort, CHIRequestMsg, reqRdy, rank=3,
 
         // Special case for possibly stale writebacks or evicts
         if (in_msg.type == CHIRequestType:WriteBackFull) {
+
+
+
+          DPRINTF(RubySlicc, "DIR ENTRY INFO: inValid=%#x, dir_entryOwner=%#x, Requestor=%#x, Ownerexist=%#x \n", is_invalid(dir_entry), dir_entry.owner, in_msg.requestor, dir_entry.ownerExists);
+
+
+
           if (is_invalid(dir_entry) || (dir_entry.ownerExists == false) ||
               (dir_entry.owner != in_msg.requestor)) {
             trigger(Event:WriteBackFull_Stale, in_msg.addr, cache_entry, tbe);
@@ -400,7 +407,7 @@ in_port(reqInPort, CHIRequestMsg, reqIn, rank=2,
 
       // Print useful metadata of the request message
       if(in_msg.addr == 0){
-        DPRINTF(ChiSlicc, 
+        DPRINTF(ChiSlicc,
               "[reqInPort][Receiver Node ID (version): %d] in_msg: type=%s addr=%#x STATE=%s requestor=%d\n",
               version, in_msg.type, in_msg.addr, curr_state,
               in_msg.requestor);

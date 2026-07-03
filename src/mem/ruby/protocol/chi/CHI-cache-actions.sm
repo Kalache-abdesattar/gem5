@@ -2664,7 +2664,7 @@ action(UpdateDirState_FromReqResp, desc="") {
         tbe.dir_ownerExists := true;
         tbe.dir_ownerIsExcl := true;
 
-        // // HACK: 
+        // // HACK:
         // if(tbe.finalState == State:RU) {
         //   tbe.dataValid := false;
         // }
@@ -2799,6 +2799,7 @@ action(Receive_SnpResp, desc="") {
   peek(rspInPort, CHIResponseMsg) {
     // Decrement pending
     if (tbe.expected_snp_resp.receiveResp(in_msg.type) == false) {
+      DPRINTF(RubySlicc, "Receive_SnpResp: Unexpected snpRsp %s at %#x \n",  address);
       error("Received unexpected message");
     }
     assert(in_msg.stale == tbe.is_stale);
@@ -2814,7 +2815,7 @@ action(Receive_SnpResp, desc="") {
     tbe.dataBlk := cache_entry.DataBlk;
     tbe.dataBlkValid.fillMask();
     tbe.dataValid := true;
-    DPRINTF(RubySlicc, "Receive_SnpResp: WB+SnpUnique collision at %#x, using stale HN cache data\n", address);
+    DPRINTF(RubySlicc, "Receive_SnpResp: SnpUnique collision at %#x, using stale HN cache data\n", address);
   }
 }
 
