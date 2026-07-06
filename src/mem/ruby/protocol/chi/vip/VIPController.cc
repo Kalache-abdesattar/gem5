@@ -14,6 +14,7 @@
 
 #include "mem/ruby/protocol/chi/vip/VIPController.hh"
 
+#include <cstddef>
 #include <cstring>
 
 #include "base/logging.hh"
@@ -68,9 +69,22 @@ VIPController::init()
                !shm->num_rnf.compare_exchange_weak(expected, desired,
                    std::memory_order_release, std::memory_order_relaxed))
             {}
-        fprintf(stderr, "[VIP:%d] init: rtl_src_id=%u num_rnf=%u\n",
-                rnf_index_, rtl_src_id_,
+        fprintf(stderr, "[VIP:%d] init: rtl_src_id=%u rtl_hnf_nid_=%u num_rnf=%u\n",
+                rnf_index_, rtl_src_id_, rtl_hnf_nid_,
                 shm->num_rnf.load(std::memory_order_relaxed));
+        // One-time layout probe: if these numbers disagree between gem5 and
+        // the Questa-side print, the shm marshalling is corrupt (byte offsets
+        // of src_id/tgt_id/home_n_id land in different places on the two
+        // sides).
+        if (rnf_index_ == 0) {
+            fprintf(stderr,
+                "[VIP:layout] sizeof(ChiIpcDat)=%zu"
+                " off(src_id)=%zu off(tgt_id)=%zu off(home_n_id)=%zu\n",
+                sizeof(chi_ipc::ChiIpcDat),
+                offsetof(chi_ipc::ChiIpcDat, src_id),
+                offsetof(chi_ipc::ChiIpcDat, tgt_id),
+                offsetof(chi_ipc::ChiIpcDat, home_n_id));
+        }
     }
 
     scheduleEvent(Cycles(1));
@@ -449,10 +463,21 @@ VIPController::makeDatMsg(const chi_ipc::ChiIpcDat& m, int beat, int beatSz)
     Addr addr;
     if (m.opcode == 0x1 || m.opcode == 0x5) {  // SnpRespData / SnpRespDataPtl
         auto sit = snp_txnid_to_addr_.find(m.txn_id);
-        addr = (sit != snp_txnid_to_addr_.end()) ? sit->second
-                                                 : static_cast<Addr>(m.addr);
-        if (sit != snp_txnid_to_addr_.end())
+        if (sit != snp_txnid_to_addr_.end()) {
+            addr = sit->second;
             snp_txnid_to_addr_.erase(sit);
+        } else {
+            addr = static_cast<Addr>(m.addr);
+            fprintf(stderr,
+                "[VIP:%d] makeDatMsg: SnpRespData miss on snp_txnid_to_addr_"
+                " op=0x%02x resp=0x%02x txn=0x%03x m.addr=0x%lx"
+                " src=%u tgt=%u → falling back to addr=0x%lx"
+                " (map has %zu entries)\n",
+                rnf_index_, (unsigned)m.opcode, (unsigned)m.resp,
+                (unsigned)m.txn_id, (unsigned long)m.addr,
+                (unsigned)m.src_id, (unsigned)m.tgt_id,
+                (unsigned long)addr, snp_txnid_to_addr_.size());
+        }
     } else {
         auto it = txnid_to_addr_.find(m.txn_id);
         addr = (it != txnid_to_addr_.end()) ? it->second
@@ -712,10 +737,13 @@ VIPController::packDat(const CHIDataMsg* msg, int beatSz)
             memcpy(line.data() + offset, m.data, n);
         }
         fprintf(stderr,
-                "[VIP] packDat txn=0x%03x tgt=%u addr=0x%lx beat=%d"
-                " off=%d n=%d d[0]=0x%02x"
-                " d[24..27]=0x%02x%02x%02x%02x d[32]=0x%02x\n",
-                m.txn_id, (unsigned)m.tgt_id,
+                "[VIP:%d] packDat txn=0x%03x src=%u tgt=%u home=%u"
+                " rtl_hnf_nid_=%u addr=0x%lx beat=%d off=%d n=%d"
+                " d[0]=0x%02x d[24..27]=0x%02x%02x%02x%02x d[32]=0x%02x\n",
+                rnf_index_,
+                m.txn_id,
+                (unsigned)m.src_id, (unsigned)m.tgt_id,
+                (unsigned)m.home_n_id, (unsigned)rtl_hnf_nid_,
                 static_cast<unsigned long>(m.addr), beat, offset, n,
                 m.data[0],
                 m.data[24], m.data[25], m.data[26], m.data[27],
