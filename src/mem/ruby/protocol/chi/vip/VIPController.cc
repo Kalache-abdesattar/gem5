@@ -131,6 +131,37 @@ VIPController::wakeup()
         chi_ipc::ChiIpcReq ipc;
         while (my_q2g_req.pop(ipc)) {
             if (ipc.opcode == 0) continue;  // ReqLCrdReturn, not a transaction
+            // Detect the DUT touching one of the two termination cache
+            // lines: 0x80040000 (tohost = PASS) or 0x80040040 (fromhost =
+            // FAIL).  A plain `sd` to either line produces a ReadUnique on
+            // the CHI wire before the store commits.  Using two disjoint
+            // addresses means the wire access itself carries the PASS/FAIL
+            // outcome — no need to wait for the value to reach gem5 via
+            // WriteBackFull (which would only happen after eviction, but
+            // the CPU immediately goes to `wfi` and nothing forces it).
+            const uint64_t line_addr = static_cast<uint64_t>(ipc.addr) & ~0x3FULL;
+            const bool is_pass = (line_addr == 0x80040000ULL);
+            const bool is_fail = (line_addr == 0x80040040ULL);
+            if (is_pass || is_fail) {
+                fprintf(stderr,
+                    "[VIP:%d] tohost %s request (op=0x%02x txn=0x%03x"
+                    " addr=0x%lx) — signalling termination\n",
+                    rnf_index_, is_pass ? "PASS" : "FAIL",
+                    (unsigned)ipc.opcode,
+                    (unsigned)ipc.txn_id, (unsigned long)ipc.addr);
+                auto* shm = shm_.layout();
+                if (shm) {
+                    shm->sim_done.store(is_pass ? 1ULL
+                                                : 0xFA11000000000001ULL,
+                                        std::memory_order_release);
+                }
+                exitSimLoop(is_pass ? "tohost: PASS (request seen)"
+                                    : "tohost: FAIL (request seen)",
+                            is_pass ? 0 : 1);
+                // Fall through — still enqueue the request so gem5 can
+                // service the ReadUnique and CVA6 doesn't hang mid-commit
+                // while gem5 tears down.
+            }
             pendingReqs_.push(makeReqMsg(ipc));
             pending = true;
         }
@@ -160,6 +191,19 @@ VIPController::wakeup()
                 if (waddr == 0x80040000ULL) {
                     uint64_t tohost_val = 0;
                     std::memcpy(&tohost_val, ipc.data, sizeof(tohost_val));
+                    if (tohost_val != 0) {
+                        // Publish the completion signal to shm BEFORE
+                        // exitSimLoop tears down.  Questa polls sim_done in
+                        // clk_posedge and calls sc_stop() so both sides
+                        // terminate on the single tohost event.  sim_done
+                        // lives at the tail of ChiShmLayout — see the
+                        // static_assert in chi_ipc.hh.
+                        auto* shm = shm_.layout();
+                        if (shm) {
+                            shm->sim_done.store(tohost_val,
+                                std::memory_order_release);
+                        }
+                    }
                     if (tohost_val == 1ULL) {
                         fprintf(stderr, "[VIP] tohost=1 — PASS\n");
                         exitSimLoop("tohost: PASS", 0);
