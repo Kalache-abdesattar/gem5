@@ -65,6 +65,7 @@ class VIPController : public CHIGenericController
     const int             rnf_index_;    // which q2g slot this VIP reads from
     const uint16_t        rtl_src_id_;  // RTL CHI NodeID of the RN-F we proxy
     const uint16_t        rtl_hnf_nid_; // RTL CHI NodeID of the HN-F (SRCID/HOMENID in outbound flits)
+    const uint64_t        quantum_ps_;  // co-sim time-quantum size in ps
 
     // Staging queue for inbound requests: q2g_req is always drained into this
     // buffer; each wakeup() then flushes as many entries as reqOut can accept.

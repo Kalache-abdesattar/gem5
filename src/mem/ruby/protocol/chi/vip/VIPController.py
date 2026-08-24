@@ -43,3 +43,8 @@ class VIPController(CHIGenericController):
     # flits so the RTL RN-F sees the expected home node ID (HNF_NID_PARAM).
     rtl_hnf_nid = Param.UInt16(0,
         "RTL CHI NodeID of the HN-F (used as SRCID/HOMENID in outbound flits)")
+
+    quantum_ps = Param.UInt64(10000,
+        "Co-sim time-quantum in ps (10000 = 10 CHI cycles). Neither gem5 nor "
+        "Questa runs more than one quantum ahead of the other. 0 disables the "
+        "barrier (loose mode). Only VIPController-0's value is used.")

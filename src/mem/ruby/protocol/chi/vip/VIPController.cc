@@ -16,6 +16,7 @@
 
 #include <cstddef>
 #include <cstring>
+#include <unistd.h>   // usleep — time-quantum barrier spin
 
 #include "base/logging.hh"
 #include "sim/sim_exit.hh"
@@ -43,6 +44,7 @@ VIPController::VIPController(const Params& p)
     , rnf_index_(p.rnf_index)
     , rtl_src_id_(static_cast<uint16_t>(p.rtl_src_id))
     , rtl_hnf_nid_(static_cast<uint16_t>(p.rtl_hnf_nid))
+    , quantum_ps_(static_cast<uint64_t>(p.quantum_ps))
 {
     if (rnf_index_ > 0) {
         // Segment was created by VIPController-0 just before us; open it now.
@@ -77,6 +79,11 @@ VIPController::init()
         // of src_id/tgt_id/home_n_id land in different places on the two
         // sides).
         if (rnf_index_ == 0) {
+            // VIPController-0 owns the quantum_ps field; publish it once so the
+            // Questa side can read it at attach.  Other VIPs must not overwrite.
+            shm->quantum_ps.store(quantum_ps_, std::memory_order_relaxed);
+            fprintf(stderr, "[VIP:0] quantum_ps=%lu\n",
+                    (unsigned long)quantum_ps_);
             fprintf(stderr,
                 "[VIP:layout] sizeof(ChiIpcDat)=%zu"
                 " off(src_id)=%zu off(tgt_id)=%zu off(home_n_id)=%zu\n",
@@ -266,6 +273,30 @@ VIPController::wakeup()
     // Using curTick() directly in ps units (valid for 1 ps tick granularity).
     shm->gem5_grant_ps.store(static_cast<uint64_t>(ct),
                              std::memory_order_release);
+
+    // ── Time-quantum barrier ─────────────────────────────────────────────────
+    // Publish gem5's next quantum boundary, then real-time spin until Questa is
+    // within one quantum of us.  Blocking HERE is what actually holds gem5's
+    // sim-time back: wakeup() runs on gem5's single event-queue thread, so this
+    // loop stalls sim-time until the separate Questa process catches up.
+    // Rescheduling in sim-time does NOT work — with no other events gem5 just
+    // fast-forwards its clock to the reschedule target and races ahead.  Only
+    // VIPController-0 drives the barrier (all VIPs share one gem5 event queue,
+    // so one is enough and avoids double-blocking).
+    if (rnf_index_ == 0) {
+        uint64_t gem5_ps = static_cast<uint64_t>(ct);
+        uint64_t Q = shm->quantum_ps.load(std::memory_order_relaxed);
+        if (Q == 0) Q = quantum_ps_;  // guard against uninitialised shm
+        uint64_t gem5_q_end = (gem5_ps / Q + 1) * Q;
+        shm->gem5_quantum_end_ps.store(gem5_q_end, std::memory_order_release);
+        // 500 µs sleeps keep CPU use low while Questa is catching up; end the
+        // co-sim rather than spin forever if Questa has finished (sim_done set).
+        while (gem5_ps >
+                   shm->questa_quantum_end_ps.load(std::memory_order_acquire) + Q
+               && shm->sim_done.load(std::memory_order_acquire) == 0) {
+            usleep(500);
+        }
+    }
 
     // Always reschedule: Questa may push into q2g at any time and there are no
     // CPUs to keep the event queue alive in standalone (Questa-only) mode.
