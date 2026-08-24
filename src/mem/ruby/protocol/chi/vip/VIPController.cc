@@ -283,10 +283,9 @@ VIPController::wakeup()
     // fast-forwards its clock to the reschedule target and races ahead.  Only
     // VIPController-0 drives the barrier (all VIPs share one gem5 event queue,
     // so one is enough and avoids double-blocking).
-    if (rnf_index_ == 0) {
+    uint64_t Q = shm->quantum_ps.load(std::memory_order_relaxed);
+    if (rnf_index_ == 0 && Q > 0) {  // Q == 0 → loose mode: no barrier
         uint64_t gem5_ps = static_cast<uint64_t>(ct);
-        uint64_t Q = shm->quantum_ps.load(std::memory_order_relaxed);
-        if (Q == 0) Q = quantum_ps_;  // guard against uninitialised shm
         uint64_t gem5_q_end = (gem5_ps / Q + 1) * Q;
         shm->gem5_quantum_end_ps.store(gem5_q_end, std::memory_order_release);
         // 500 µs sleeps keep CPU use low while Questa is catching up; end the

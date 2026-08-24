@@ -261,6 +261,7 @@ def create_system(
                     rnf_index=i,
                     rtl_src_id=rtl_src_id,
                     rtl_hnf_nid=rtl_hnf_nid,
+                    quantum_ps=getattr(system, '_vip_quantum_ps', 10000),
                 )
                 vip.downstream_destinations = hnf_dests
                 network_cntrls.append(vip)
