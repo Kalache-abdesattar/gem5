@@ -509,7 +509,13 @@ VIPController::makeDatMsg(const chi_ipc::ChiIpcDat& m, int beat, int beatSz)
         auto sit = snp_txnid_to_addr_.find(m.txn_id);
         if (sit != snp_txnid_to_addr_.end()) {
             addr = sit->second;
-            snp_txnid_to_addr_.erase(sit);
+            // One IPC SnpRespData is split into dataMsgsPerLine gem5 beats, each
+            // calling makeDatMsg with the same TxnID.  Erase the address entry
+            // only on the LAST beat — erasing on beat 0 made beats 1..N-1 miss
+            // and fall back to addr 0 (SnpRespData_I_PD → addr 0 panic at any
+            // width where dataMsgsPerLine > 1, e.g. 128b → 4 beats).
+            if (beat == dataMsgsPerLine - 1)
+                snp_txnid_to_addr_.erase(sit);
         } else {
             addr = static_cast<Addr>(m.addr);
             fprintf(stderr,
@@ -801,7 +807,7 @@ VIPController::packSnp(const CHIRequestMsg* msg)
 {
     chi_ipc::ChiIpcSnp m{};
     m.addr             = static_cast<uint64_t>(msg->getaddr());
-    m.txn_id           = static_cast<uint8_t>(msg->gettxnId());
+    m.txn_id           = static_cast<uint16_t>(msg->gettxnId());
     m.src_id           = static_cast<uint16_t>(msg->getrequestor().num);
     m.tgt_id           = rtl_src_id_;
     m.fwd_n_id         = static_cast<uint16_t>(msg->getfwdRequestor().num);
