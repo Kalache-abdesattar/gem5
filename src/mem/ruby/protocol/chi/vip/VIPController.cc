@@ -288,12 +288,20 @@ VIPController::wakeup()
         uint64_t gem5_ps = static_cast<uint64_t>(ct);
         uint64_t gem5_q_end = (gem5_ps / Q + 1) * Q;
         shm->gem5_quantum_end_ps.store(gem5_q_end, std::memory_order_release);
-        // 500 µs sleeps keep CPU use low while Questa is catching up; end the
-        // co-sim rather than spin forever if Questa has finished (sim_done set).
-        while (gem5_ps >
-                   shm->questa_quantum_end_ps.load(std::memory_order_acquire) + Q
-               && shm->sim_done.load(std::memory_order_acquire) == 0) {
-            usleep(500);
+        // Wake Questa if it is blocked waiting on gem5's progress.
+        shm->gem5_seq.fetch_add(1, std::memory_order_release);
+        chi_ipc::futex_wake(&shm->gem5_seq);
+        // Block (not poll) until Questa is within one quantum, or the sim ends.
+        // Sampling questa_seq *before* the range re-check makes wakes lossless:
+        // if Questa bumps questa_seq between the check and the wait, futex_wait
+        // returns immediately.  The 100 ms timeout re-checks sim_done so a
+        // finished/dead Questa can't hang gem5 forever.
+        while (shm->sim_done.load(std::memory_order_acquire) == 0) {
+            uint32_t s = shm->questa_seq.load(std::memory_order_acquire);
+            if (gem5_ps <=
+                    shm->questa_quantum_end_ps.load(std::memory_order_acquire) + Q)
+                break;
+            chi_ipc::futex_wait(&shm->questa_seq, s);
         }
     }
 
