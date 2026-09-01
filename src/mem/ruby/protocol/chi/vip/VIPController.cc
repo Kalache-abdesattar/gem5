@@ -747,7 +747,10 @@ VIPController::packDat(const CHIDataMsg* msg, int beatSz)
 {
     chi_ipc::ChiIpcDat m{};
     m.addr      = static_cast<uint64_t>(msg->getaddr());
-    m.txn_id    = static_cast<uint8_t>(msg->gettxnId());
+    // 16-bit, not 8: per-core TxnID bases are 0x80 apart, so >2 cores exceed 8
+    // bits (core 2 = 0x100+, core 3 = 0x180+). Truncating to uint8_t aliased
+    // core 2→0 and core 3→1, mis-routing every response and deadlocking at boot.
+    m.txn_id    = static_cast<uint16_t>(msg->gettxnId());
     m.src_id    = rtl_hnf_nid_;
     {
         auto it = txnid_to_src_id_.find(static_cast<uint16_t>(m.txn_id));
