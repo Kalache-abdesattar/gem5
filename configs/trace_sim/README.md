@@ -263,3 +263,70 @@ supply the dependency graph -- `reg_dep` via last-writer tracking per register,
 must be labelled as a synthetic in-order timing model, not as Elastic Traces:
 the +0.1% accuracy figure above belongs to gem5-captured traces and does not
 transfer.
+
+## Option A': ElasticSimMATE from Pin (synthetic comp_delay)
+
+Emits the elastic-trace *pair* from a Pin run, so gem5's `TraceCPU` -- with its
+real dependency machinery, ROB/LQ/SQ modelling and I-side -- replays a stream
+captured on hardware at ~100 MIPS instead of at gem5-O3 speed.
+
+```
+# 1. capture the dependency graph on real hardware
+pin -t ~/fedora/pintools/etrace/obj-intel64/etrace.so -o et/run -max 2000000 \
+    -- <binary> <args>
+
+# 2. convert, choosing the synthetic compute delay
+protoc --python_out=<pb2dir> -I src/proto src/proto/packet.proto
+protoc --python_out=<pb2dir> -I src/proto src/proto/inst_dep_record.proto
+python configs/trace_sim/etrace_to_elastic.py et/ out/ --pb2-dir <pb2dir> \
+       --comp-delay 500
+
+# 3. replay with the unmodified TraceCPU
+build/X86_CHI/gem5.opt --outdir=m5out/pinreplay configs/trace_sim/replay.py \
+    --trace-dir out/ --num-cores 1
+```
+
+### What Pin supplies, and what it cannot
+
+| elastic-trace field | source |
+|---|---|
+| `seq_num`, `pc`, `type`, `size` | Pin, directly |
+| `p_addr` | Pin, page-remapped (host virtual addresses are ~140 TB) |
+| `reg_dep` | Pin: last-writer-per-register, using `REG_FullRegName` so partial registers alias correctly |
+| `rob_dep` | Pin: last access to the same line (store->load / store->store ordering) |
+| I-side `packet.proto` | synthesised: one fetch per instruction cache line touched |
+| **`comp_delay`** | **SYNTHESISED. Pin cannot derive it.** |
+
+`comp_delay` in real elastic traces is a difference of O3 pipeline timestamps
+(`executeTick` / `toCommitTick` / `commitTick`), taken as the *minimum* across a
+node's dependency edges. Pin has no pipeline and no cycles. The converter
+assigns a fixed per-type delay instead.
+
+### comp_delay is the CPU model
+
+Sweeping it on a 20k-record trace shows it directly sets the timing:
+
+| `--comp-delay` (ticks) | CPI | simTicks |
+|---|---|---|
+| 250 | 1.098 | 10,982,250 |
+| 500 | 1.099 | 10,994,500 |
+| 1000 | 1.650 | 16,495,500 |
+| 2000 | 2.762 | 27,615,000 |
+
+Flat from 250 to 500 because below ~1 cycle of compute delay the memory system
+is the critical path; above it, the synthetic delay dominates. Useful as a
+sanity check, and a reminder of what this is: **a synthetic in-order timing
+model driving a real memory system.** The +0.1% accuracy figure earlier in this
+file belongs to gem5-captured traces and does not transfer.
+
+### Verified
+
+20k records from `/bin/echo`, replayed through the stock `TraceCPU`:
+
+```
+system.cpu.numOps                20000
+system.cpu.cpi                   1.099450
+system.cpu..dside.maxDependents  50        <- dependency graph is live
+system.cpu..dside.numSendFailed  17        <- and back-pressured
+system.cpu.icache.overallMisses  94
+```
