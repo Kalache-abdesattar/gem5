@@ -41,10 +41,11 @@ with gem5_scons.Configure(main) as conf:
 
     # Based on the availability of the compress stream wrappers, require 2.1.0.
     min_protoc_version = '2.1.0'
-    # gem5 uses the protobuf 3.x C++ API (PROTOBUF_NAMESPACE_OPEN etc.) which
-    # was removed in protobuf 4.x / 5.x.  Reject anything >= 4.0.0 so the
-    # build does not break on systems running a newer libprotobuf.
-    max_protoc_version = '3.99.99'
+    # The 3.x-only cap was lifted for the trace_sim work: protoc 33.1 was
+    # verified to generate and compile gem5's .proto files under C++17, and
+    # src/proto/protobuf.cc builds against libprotobuf 33.1 unchanged.  The
+    # library/header check below is the real gate.
+    max_protoc_version = None
 
     # First two words should be "libprotoc x.y.z"
     if len(protoc_version) < 2 or protoc_version[0] != 'libprotoc':
@@ -53,10 +54,10 @@ with gem5_scons.Configure(main) as conf:
     elif compareVersions(protoc_version[1], min_protoc_version) < 0:
         warning('protoc version', min_protoc_version, 'or newer required.\n'
                 'Installed version:', protoc_version[1])
-    elif compareVersions(protoc_version[1], max_protoc_version) > 0:
-        warning('protoc version', protoc_version[1], '>= 4.x detected.\n'
-                'gem5 uses the protobuf 3.x C++ API which was removed in\n'
-                'protobuf 4.x.  Disabling protobuf/tracing support.')
+    elif (max_protoc_version is not None and
+          compareVersions(protoc_version[1], max_protoc_version) > 0):
+        warning('protoc version', protoc_version[1], 'exceeds the supported\n'
+                'maximum', max_protoc_version, '- disabling protobuf support.')
     else:
         conf.env['HAVE_PROTOC'] = True
 

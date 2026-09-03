@@ -127,17 +127,17 @@ ElasticTrace::regEtraceListeners()
     // each probe point.
     connectListener<ProbeListenerArg<ElasticTrace, RequestPtr>>(
         this, "FetchRequest", &ElasticTrace::fetchReqTrace);
-    connectListener<ProbeListenerArg<ElasticTrace, DynInstConstPtr>>(
+    connectListener<ProbeListenerArg<ElasticTrace, DynInstPtr>>(
         this, "Execute", &ElasticTrace::recordExecTick);
-    connectListener<ProbeListenerArg<ElasticTrace, DynInstConstPtr>>(
+    connectListener<ProbeListenerArg<ElasticTrace, DynInstPtr>>(
         this, "ToCommit", &ElasticTrace::recordToCommTick);
-    connectListener<ProbeListenerArg<ElasticTrace, DynInstConstPtr>>(
+    connectListener<ProbeListenerArg<ElasticTrace, DynInstPtr>>(
         this, "Rename", &ElasticTrace::updateRegDep);
     connectListener<ProbeListenerArg<ElasticTrace, SeqNumRegPair>>(
         this, "SquashInRename", &ElasticTrace::removeRegDepMapEntry);
-    connectListener<ProbeListenerArg<ElasticTrace, DynInstConstPtr>>(
+    connectListener<ProbeListenerArg<ElasticTrace, DynInstPtr>>(
         this, "Squash", &ElasticTrace::addSquashedInst);
-    connectListener<ProbeListenerArg<ElasticTrace, DynInstConstPtr>>(
+    connectListener<ProbeListenerArg<ElasticTrace, DynInstPtr>>(
         this, "Commit", &ElasticTrace::addCommittedInst);
     allProbesReg = true;
 }
@@ -165,7 +165,7 @@ ElasticTrace::fetchReqTrace(const RequestPtr &req)
 }
 
 void
-ElasticTrace::recordExecTick(const DynInstConstPtr& dyn_inst)
+ElasticTrace::recordExecTick(const DynInstPtr& dyn_inst)
 {
 
     // In a corner case, a retired instruction is propagated backward to the
@@ -202,7 +202,7 @@ ElasticTrace::recordExecTick(const DynInstConstPtr& dyn_inst)
 }
 
 void
-ElasticTrace::recordToCommTick(const DynInstConstPtr& dyn_inst)
+ElasticTrace::recordToCommTick(const DynInstPtr& dyn_inst)
 {
     // If tracing has just been enabled then the instruction at this stage of
     // execution is far enough that we cannot gather info about its past like
@@ -223,7 +223,7 @@ ElasticTrace::recordToCommTick(const DynInstConstPtr& dyn_inst)
 }
 
 void
-ElasticTrace::updateRegDep(const DynInstConstPtr& dyn_inst)
+ElasticTrace::updateRegDep(const DynInstPtr& dyn_inst)
 {
     // Get the sequence number of the instruction
     InstSeqNum seq_num = dyn_inst->seqNum;
@@ -293,14 +293,14 @@ void
 ElasticTrace::removeRegDepMapEntry(const SeqNumRegPair &inst_reg_pair)
 {
     DPRINTFR(ElasticTrace, "Remove Map entry for Reg %i\n",
-            inst_reg_pair.second);
-    auto itr_regdep_map = physRegDepMap.find(inst_reg_pair.second);
+            inst_reg_pair.second->flatIndex());
+    auto itr_regdep_map = physRegDepMap.find(inst_reg_pair.second->flatIndex());
     if (itr_regdep_map != physRegDepMap.end())
         physRegDepMap.erase(itr_regdep_map);
 }
 
 void
-ElasticTrace::addSquashedInst(const DynInstConstPtr& head_inst)
+ElasticTrace::addSquashedInst(const DynInstPtr& head_inst)
 {
     // If the squashed instruction was squashed before being processed by
     // execute stage then it will not be in the temporary store. In this case
@@ -328,7 +328,7 @@ ElasticTrace::addSquashedInst(const DynInstConstPtr& head_inst)
 }
 
 void
-ElasticTrace::addCommittedInst(const DynInstConstPtr& head_inst)
+ElasticTrace::addCommittedInst(const DynInstPtr& head_inst)
 {
     DPRINTFR(ElasticTrace, "Attempt to add committed inst [sn:%lli]\n",
                 head_inst->seqNum);
@@ -387,7 +387,7 @@ ElasticTrace::addCommittedInst(const DynInstConstPtr& head_inst)
 }
 
 void
-ElasticTrace::addDepTraceRecord(const DynInstConstPtr& head_inst,
+ElasticTrace::addDepTraceRecord(const DynInstPtr& head_inst,
                                 InstExecInfo* exec_info_ptr, bool commit)
 {
     // Create a record to assign dynamic intruction related fields.
@@ -649,7 +649,7 @@ ElasticTrace::hasCompCompleted(TraceInfo* past_record,
 }
 
 void
-ElasticTrace::clearTempStoreUntil(const DynInstConstPtr& head_inst)
+ElasticTrace::clearTempStoreUntil(const DynInstPtr& head_inst)
 {
     // Clear from temp store starting with the execution info object
     // corresponding the head_inst and continue clearing by decrementing the
@@ -913,11 +913,19 @@ ElasticTrace::TraceInfo::typeToStr() const
 void
 ElasticTrace::flushTraces()
 {
+    // Idempotent: gem5 can run exit callbacks more than once, and with one
+    // probe per core several ElasticTrace instances tear down in sequence.
+    // Without this guard the second entry double-frees the streams, which
+    // shows up as a segfault at exit once numCores > 1.
+    if (dataTraceStream == nullptr && instTraceStream == nullptr)
+        return;
     // Write to trace all records in the depTrace.
     writeDepTrace(depTrace.size());
     // Delete the stream objects
     delete dataTraceStream;
+    dataTraceStream = nullptr;
     delete instTraceStream;
+    instTraceStream = nullptr;
 }
 
 } // namespace o3
