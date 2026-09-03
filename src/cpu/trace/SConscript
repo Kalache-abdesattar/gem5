@@ -5,6 +5,13 @@ if not env['CONF']['HAVE_PROTOBUF']:
     Return()
 
 SimObject(
+    'SyncArbiter.py',
+    sim_objects=['SyncArbiter'],
+    tags=['protobuf']
+)
+Source('sync_arbiter.cc', tags=['protobuf'])
+
+SimObject(
     'TraceCPU.py',
     sim_objects=['TraceCPU'],
     tags=['protobuf']

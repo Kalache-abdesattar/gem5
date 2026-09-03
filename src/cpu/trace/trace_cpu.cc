@@ -37,6 +37,9 @@
 
 #include "cpu/trace/trace_cpu.hh"
 
+#include "proto/protoio.hh"
+#include "proto/sync_event.pb.h"
+
 #include "base/compiler.hh"
 #include "sim/sim_exit.hh"
 #include "sim/system.hh"
@@ -61,6 +64,13 @@ TraceCPU::TraceCPU(const TraceCPUParams &params)
                   params),
         icacheNextEvent([this]{ schedIcacheNext(); }, name()),
         dcacheNextEvent([this]{ schedDcacheNext(); }, name()),
+        nextSyncIdx(0),
+        syncEnabled(false),
+        syncStalled(false),
+        stalledPendingTick(MaxTick),
+        arbiterId(0),
+        arbiter(params.arbiter),
+        syncBarriersHit(0),
         oneTraceComplete(false),
         traceOffset(0),
         execCompleteEvent(nullptr),
@@ -82,6 +92,8 @@ TraceCPU::TraceCPU(const TraceCPUParams &params)
     fatal_if(params.sizeLoadBuffer > UINT16_MAX,
              "Load buffer size set to %d exceeds the max. value of %d.",
                 params.sizeLoadBuffer, UINT16_MAX);
+
+    initSyncTrace(params.syncTraceFile);
 }
 
 void
@@ -167,6 +179,8 @@ TraceCPU::schedIcacheNext()
 void
 TraceCPU::schedDcacheNext()
 {
+    if (syncStalled)
+        return;
     DPRINTF(TraceCPUData, "DcacheGen event.\n");
 
     // Update stat for numCycles
@@ -174,7 +188,15 @@ TraceCPU::schedDcacheNext()
 
     dcacheGen.execute();
     if (dcacheGen.isExecComplete()) {
+        // Trace exhausted: retire from the barrier so the others are not
+        // left waiting on a CPU that will never arrive again.
+        if (syncEnabled) {
+            syncEnabled = false;
+            arbiter->retire(arbiterId);
+        }
         checkAndSchedExitEvent();
+    } else {
+        checkSyncPoint();
     }
 }
 
@@ -1133,6 +1155,14 @@ TraceCPU::dcacheRetryRecvd()
 void
 TraceCPU::schedDcacheNextEvent(Tick when)
 {
+    if (syncStalled) {
+        // Parked at a synchronisation point: remember the earliest request and
+        // replay it when the arbiter opens the barrier.
+        stalledPendingTick = std::min(stalledPendingTick, when);
+        DPRINTF(TraceCPUData, "Sync-stalled, deferring dcache event to %lli\n",
+                stalledPendingTick);
+        return;
+    }
     if (!dcacheNextEvent.scheduled()) {
         DPRINTF(TraceCPUData, "Scheduling next DcacheGen event at %lli.\n",
                 when);
@@ -1423,6 +1453,75 @@ TraceCPU::FixedRetryGen::InputStream::read(TraceElement* element)
 
     // We have reached the end of the file
     return false;
+}
+
+void
+TraceCPU::initSyncTrace(const std::string &filename)
+{
+    if (filename.empty())
+        return;
+    fatal_if(!arbiter, "%s: syncTraceFile is set but no arbiter was given; "
+             "without one the CPUs cannot be released together.", name());
+
+    ProtoInputStream in(filename);
+    ProtoMessage::SyncEventHeader header;
+    if (!in.read(header))
+        fatal("%s: could not read header of sync trace %s", name(), filename);
+
+    ProtoMessage::SyncEvent ev;
+    while (in.read(ev)) {
+        SyncPoint sp;
+        sp.numInsts = ev.num_insts();
+        sp.type = ev.type();
+        sp.isEnd = ev.is_end() != 0;
+        syncPoints.push_back(sp);
+    }
+
+    syncEnabled = !syncPoints.empty();
+    arbiterId = arbiter->registerCpu(this);
+    inform("%s: loaded %llu synchronisation points from %s (arbiter id %u)",
+           name(), (unsigned long long)syncPoints.size(), filename, arbiterId);
+}
+
+void
+TraceCPU::checkSyncPoint()
+{
+    if (!syncEnabled || syncStalled)
+        return;
+    if (nextSyncIdx >= syncPoints.size()) {
+        // Trace exhausted: stop holding up everyone else.
+        if (syncEnabled) {
+            syncEnabled = false;
+            arbiter->retire(arbiterId);
+        }
+        return;
+    }
+    if (traceStats.numOps.value() < syncPoints[nextSyncIdx].numInsts)
+        return;
+
+    ++nextSyncIdx;
+    ++syncBarriersHit;
+    syncStalled = true;
+    stalledPendingTick = MaxTick;
+    if (dcacheNextEvent.scheduled())
+        deschedule(dcacheNextEvent);
+    DPRINTF(TraceCPUData, "Reached sync point %llu at %llu ops; waiting.\n",
+            (unsigned long long)nextSyncIdx,
+            (unsigned long long)traceStats.numOps.value());
+    arbiter->arrive(arbiterId);
+}
+
+void
+TraceCPU::releaseFromSync()
+{
+    if (!syncStalled)
+        return;
+    syncStalled = false;
+    const Tick when = (stalledPendingTick == MaxTick)
+                          ? clockEdge(Cycles(1)) : stalledPendingTick;
+    stalledPendingTick = MaxTick;
+    DPRINTF(TraceCPUData, "Released from sync, resuming at %lli\n", when);
+    schedDcacheNextEvent(std::max(when, clockEdge(Cycles(1))));
 }
 
 } // namespace gem5

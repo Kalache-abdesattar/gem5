@@ -40,6 +40,10 @@ def parse_args():
     p.add_argument("--rob", type=int, default=40)
     p.add_argument("--lq", type=int, default=16)
     p.add_argument("--sq", type=int, default=16)
+    p.add_argument("--sync", action="store_true",
+                   help="honour the per-core sync traces via a SyncArbiter "
+                        "(ElasticSimMATE). Without this the TraceCPUs replay "
+                        "independently and every barrier is invisible.")
     return p.parse_args()
 
 
@@ -69,7 +73,10 @@ def main():
         for f in (inst_f, data_f):
             if not os.path.isfile(f):
                 fatal("missing trace: %s", f)
-        traces.append((inst_f, data_f))
+        sync_f = os.path.join(args.trace_dir, f"cpu{i}.sync.trace.gz")
+        if args.sync and not os.path.isfile(sync_f):
+            fatal("--sync given but missing %s", sync_f)
+        traces.append((inst_f, data_f, sync_f if args.sync else ""))
 
     system = System()
     system.clk_domain = SrcClockDomain(
@@ -78,10 +85,15 @@ def main():
     system.mem_ranges = [AddrRange(args.mem_size)]
     system.membus = SystemXBar()
 
+    if args.sync:
+        system.arbiter = SyncArbiter(num_cpus=args.num_cores)
+
     system.cpu = [
         TraceCPU(
             instTraceFile=traces[i][0],
             dataTraceFile=traces[i][1],
+            syncTraceFile=traces[i][2],
+            arbiter=(system.arbiter if args.sync else NULL),
             sizeROB=args.rob,
             sizeLoadBuffer=args.lq,
             sizeStoreBuffer=args.sq,
@@ -120,7 +132,8 @@ def main():
     m5.instantiate()
 
     print(f"[trace_sim] replay: {args.num_cores} TraceCPU(s) "
-          f"ROB={args.rob} LQ={args.lq} SQ={args.sq}")
+          f"ROB={args.rob} LQ={args.lq} SQ={args.sq} "
+          f"sync={'on' if args.sync else 'OFF (independent streams)'}")
     exit_event = m5.simulate()
     print(f"[trace_sim] done @ tick {m5.curTick()}: {exit_event.getCause()}")
 

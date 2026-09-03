@@ -50,6 +50,7 @@
 #include "mem/packet.hh"
 #include "mem/port.hh"
 #include "mem/request.hh"
+#include "cpu/trace/sync_arbiter.hh"
 #include "params/TraceCPU.hh"
 #include "proto/inst_dep_record.pb.h"
 #include "proto/packet.pb.h"
@@ -189,6 +190,45 @@ class TraceCPU : public ClockedObject
      * @param when Tick at which to schedule event
      */
     void schedDcacheNextEvent(Tick when);
+
+    /* ---- ElasticSimMATE synchronisation ---------------------------------
+     * The sync trace records, per region boundary, how many ops the reference
+     * run had executed. We count ops as they are replayed; on reaching the
+     * next boundary the CPU stops scheduling D-side work and tells the
+     * arbiter. The arbiter calls releaseFromSync() once every participant has
+     * arrived.  Gating schedDcacheNextEvent() is sufficient because it is the
+     * single choke point for D-side progress. */
+
+    /** Called by the arbiter when the barrier opens. */
+    void releaseFromSync();
+
+    /** True while parked at a synchronisation point. */
+    bool isSyncStalled() const { return syncStalled; }
+
+  private:
+    /** Load the sync trace, if one was configured. */
+    void initSyncTrace(const std::string &filename);
+
+    /** Called after each batch of replayed ops; stalls at a boundary. */
+    void checkSyncPoint();
+
+    struct SyncPoint
+    {
+        uint64_t numInsts;
+        uint32_t type;
+        bool isEnd;
+    };
+
+    std::vector<SyncPoint> syncPoints;
+    size_t   nextSyncIdx;
+    bool     syncEnabled;
+    bool     syncStalled;
+    Tick     stalledPendingTick;
+    unsigned arbiterId;
+    SyncArbiter *arbiter;
+    uint64_t syncBarriersHit;
+
+  public:
 
   protected:
 

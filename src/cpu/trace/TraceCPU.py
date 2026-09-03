@@ -61,6 +61,14 @@ class TraceCPU(ClockedObject):
     dcache_port = RequestPort("Data Port")
     instTraceFile = Param.String("", "Instruction trace file")
     dataTraceFile = Param.String("", "Data dependency trace file")
+    syncTraceFile = Param.String(
+        "", "Synchronisation event trace file (ElasticSimMATE). Empty "
+        "disables synchronisation and the CPU replays independently."
+    )
+    arbiter = Param.SyncArbiter(
+        NULL, "Arbiter that releases TraceCPUs together at recorded "
+        "synchronisation points. Required if syncTraceFile is set."
+    )
     sizeStoreBuffer = Param.Unsigned(
         16, "Number of entries in the store buffer"
     )

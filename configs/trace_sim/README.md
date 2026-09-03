@@ -28,7 +28,7 @@ an arbiter that stalls TraceCPUs at the recorded sync points.
 | 1. Single-core capture + replay | **working, validated** | `capture.py`, `replay.py`; validates the ET pipeline end to end and gives a replay-vs-O3 accuracy baseline |
 | 2. Per-core traces, N-core replay | **working** | one trace pair per core; N TraceCPUs sharing a cache hierarchy. Still *no* sync — the known-wrong baseline that motivates step 3 |
 | 3. Synchronisation trace | **working** | record sync events (barrier / critical / parallel-region) with instruction + dependency counts per region |
-| 4. Arbiter | planned | a SimObject that locks/unlocks TraceCPUs at region boundaries, per Fig. 4b of the paper |
+| 4. Arbiter | **working** | a SimObject that locks/unlocks TraceCPUs at region boundaries, per Fig. 4b of the paper |
 | 5. Replication | planned | replay an N-core trace onto M > N cores for weak-scaling studies |
 | 6. CHI / Ruby back end | planned | swap the classic hierarchy for the CHI setup this repo already uses |
 
@@ -330,3 +330,54 @@ system.cpu..dside.maxDependents  50        <- dependency graph is live
 system.cpu..dside.numSendFailed  17        <- and back-pressured
 system.cpu.icache.overallMisses  94
 ```
+
+
+## Step 4: the arbiter
+
+This is the piece that makes multicore replay mean anything. Before it, N
+TraceCPUs raced independently and every barrier in the original program was
+invisible.
+
+* `src/cpu/trace/sync_arbiter.{hh,cc}` + `SyncArbiter.py` -- a SimObject that
+  collects arrivals and releases every participant together.
+* `TraceCPU` gains `syncTraceFile` and `arbiter` params, reads the sync trace
+  at construction, and counts `numOps` against each recorded boundary.
+* Stalling gates `schedDcacheNextEvent()`, the single choke point for D-side
+  progress; the deferred tick is remembered and replayed on release.
+* A TraceCPU whose trace runs out calls `arbiter->retire()`, otherwise the
+  remaining CPUs would wait forever on a core that will never arrive again.
+  `retire()` also drops a pending vote and re-evaluates, so retiring the last
+  outstanding participant releases the barrier instead of deadlocking.
+
+Run it with `replay.py --sync`. Without the flag the CPUs replay independently,
+which is the stock-gem5 behaviour and is kept deliberately as the contrast.
+
+### Verified
+
+2 cores, 13 sync points each, `--debug-flags=TraceCPUData`:
+
+```
+192531000: cpu0: Reached sync point 1 at 140171 ops; waiting.
+192531000: SyncArbiter: cpu 0 arrived (1/2)
+196056500: cpu1: Reached sync point 1 at 140191 ops; waiting.
+196056500: SyncArbiter: cpu 1 arrived (2/2)
+196056500: SyncArbiter: releasing barrier 1
+```
+
+cpu0 waited 3,525,500 ticks for cpu1 -- a barrier genuinely holding a core
+back. Totals: 13 barriers released, 26 arrivals, 26 stalls, 26 resumes,
+2 retires. Every stall matched by a resume; no deadlock.
+
+simTicks 363,073,000 (no sync) vs 363,961,000 (sync). The gap is small here
+only because both cores replay *identical* traces and stay in lockstep, so the
+barriers rarely bite. Asymmetric traces or asymmetric cache configurations are
+where this starts to matter.
+
+### Still missing from the paper
+
+* **Trace replication N -> M** for weak-scaling studies (paper section III-A4b).
+* The Pin path (`pintools/etrace`) records no sync events, so it cannot feed
+  the arbiter yet -- it would need to hook the same workbegin/workend markers.
+* Region *type* (parallel / critical / barrier) is parsed but not acted on:
+  every boundary is treated as a full barrier. Critical sections should be
+  mutual exclusion, not a rendezvous.
