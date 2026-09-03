@@ -143,7 +143,7 @@ def normalise_names(system, out_dir):
     """Rename <path>.inst.trace.gz -> cpuN.inst.trace.gz (stable for replay)."""
     for i, cpu in enumerate(system.cpu):
         base = cpu.traceListener.path()
-        for kind in ("inst", "data"):
+        for kind in ("inst", "data", "sync"):
             src = os.path.join(out_dir, f"{base}.{kind}.trace.gz")
             dst = os.path.join(out_dir, f"cpu{i}.{kind}.trace.gz")
             if os.path.exists(src):

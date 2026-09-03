@@ -52,6 +52,7 @@
 
 #include "base/statistics.hh"
 #include "cpu/o3/dyn_inst_ptr.hh"
+#include "cpu/sync_event.hh"
 #include "cpu/reg_class.hh"
 #include "mem/request.hh"
 #include "params/ElasticTrace.hh"
@@ -120,6 +121,13 @@ class ElasticTrace : public ProbeListenerObject
      * output streams and delete the streams at simulation exit.
      */
     void flushTraces();
+
+    /**
+     * Record a synchronisation event (ElasticSimMATE's third trace).  Called
+     * from the "SyncEvent" probe point, which the workbegin/workend
+     * pseudo-instructions notify.
+     */
+    void recordSyncEvent(const SyncEventInfo &info);
 
     /**
      * Take the fields of the request class object that are relevant to create
@@ -356,6 +364,14 @@ class ElasticTrace : public ProbeListenerObject
 
     /** Protobuf output stream for instruction fetch trace. */
     ProtoOutputStream* instTraceStream;
+
+    /** Synchronisation event trace: one record per region begin/end.
+     *  This is ElasticSimMATE's third trace file. */
+    ProtoOutputStream* syncTraceStream;
+
+    /** Dependency records emitted so far. The replayer diffs consecutive sync
+     *  records to get the number of dependencies inside each region. */
+    uint64_t numDepRecords;
 
     /** Number of instructions after which to enable tracing. */
     const InstSeqNum startTraceInst;

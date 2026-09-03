@@ -394,6 +394,8 @@ BaseCPU::regProbePoints()
 
     ppSleeping = new ProbePointArg<bool>(this->getProbeManager(),
                                          "Sleeping");
+    ppSyncEvent = new ProbePointArg<SyncEventInfo>(this->getProbeManager(),
+                                                   "SyncEvent");
 }
 
 void

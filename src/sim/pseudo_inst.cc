@@ -509,6 +509,9 @@ workbegin(ThreadContext *tc, uint64_t workid, uint64_t threadid)
             threadid);
     tc->getCpuPtr()->workItemBegin();
     sys->workItemBegin(threadid, workid);
+    // Notify trace listeners (ElasticTrace builds the synchronisation trace
+    // from these; see configs/trace_sim/).
+    tc->getCpuPtr()->notifySyncEvent({workid, threadid, false});
 
     //
     // If specified, determine if this is the specific work item the user
@@ -562,6 +565,10 @@ workend(ThreadContext *tc, uint64_t workid, uint64_t threadid)
     DPRINTF(PseudoInst, "pseudo_inst::workend(%i, %i)\n", workid, threadid);
     System *sys = tc->getSystemPtr();
     const System::Params &params = sys->params();
+
+    // Notify trace listeners before any early return below, so a region end is
+    // always recorded even when exit_on_work_items is set.
+    tc->getCpuPtr()->notifySyncEvent({workid, threadid, true});
 
     if (params.exit_on_work_items) {
         exitSimLoop("workend", static_cast<int>(workid));

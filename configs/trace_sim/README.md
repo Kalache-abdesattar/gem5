@@ -27,7 +27,7 @@ an arbiter that stalls TraceCPUs at the recorded sync points.
 |------|-------|--------------|
 | 1. Single-core capture + replay | **working, validated** | `capture.py`, `replay.py`; validates the ET pipeline end to end and gives a replay-vs-O3 accuracy baseline |
 | 2. Per-core traces, N-core replay | **working** | one trace pair per core; N TraceCPUs sharing a cache hierarchy. Still *no* sync — the known-wrong baseline that motivates step 3 |
-| 3. Synchronisation trace | planned | record sync events (barrier / critical / parallel-region) with instruction + dependency counts per region |
+| 3. Synchronisation trace | **working** | record sync events (barrier / critical / parallel-region) with instruction + dependency counts per region |
 | 4. Arbiter | planned | a SimObject that locks/unlocks TraceCPUs at region boundaries, per Fig. 4b of the paper |
 | 5. Replication | planned | replay an N-core trace onto M > N cores for weak-scaling studies |
 | 6. CHI / Ruby back end | planned | swap the classic hierarchy for the CHI setup this repo already uses |
@@ -136,3 +136,68 @@ Workaround: bound the capture with `--maxinsts` so the run ends on
 "max instruction count" before the processes exit. This is what you want for
 trace capture anyway -- you trace a region of interest, not a whole program.
 This goes away in FS mode, which is what the paper uses and what step 3 needs.
+
+
+## Step 3: the synchronisation trace
+
+ElasticSimMATE's third trace file, emitted per core alongside the instruction
+and dependency traces as `cpuN.sync.trace.gz`.
+
+**Marking regions.** Rather than adding a new pseudo-instruction, this reuses
+gem5's existing `workbegin`/`workend` m5 ops: already decoded on every ISA and
+already reachable from a workload. The low byte of `workid` carries the class:
+
+| workid & 0xff | meaning |
+|---|---|
+| 0 | parallel region |
+| 1 | critical section |
+| 2 | barrier |
+
+**Record contents** (`src/proto/sync_event.proto`), matching the paper's list:
+tick, PC, thread id, begin/end edge, event type, instructions committed and
+dependency records emitted. The replayer diffs consecutive records to get the
+counts *inside* each region - what the step-4 arbiter counts down before
+stalling a TraceCPU.
+
+**Plumbing added to gem5:**
+
+* `src/cpu/sync_event.hh` - `SyncEventInfo` payload.
+* `src/cpu/base.{hh,cc}` - a `SyncEvent` probe point plus a public
+  `notifySyncEvent()` accessor (the probe member itself is protected).
+* `src/sim/pseudo_inst.cc` - `workbegin`/`workend` notify it. `workend`
+  notifies before the `exit_on_work_items` early return, so a region end is
+  recorded even in that mode.
+* `src/cpu/o3/probe/elastic_trace.{cc,hh}` - opens the third stream, counts
+  dependency records, writes one message per marker.
+
+**Decoding:** `configs/trace_sim/decode_sync.py <cpuN.sync.trace.gz> <pb2dir>`
+after `protoc --python_out=<pb2dir> -I src/proto src/proto/sync_event.proto`.
+The Python protobuf runtime is not installed system-wide here - pacman would
+upgrade libprotobuf to 34.x and break both the gem5 build and libphonenumber -
+so use a venv.
+
+Verified on a workload doing three rounds of parallel / critical / barrier:
+
+```
+        tick type      edge    tid     insts      deps   d_insts   d_deps
+    80837000 parallel  begin     0    140151    222795    140151   222795
+    84915000 parallel  end       0    158166    252777     18015    29982
+    84918000 critical  begin     0    158169    252777         3        0
+    85318000 critical  end       0    159984    255826      1815     3049
+    85321000 barrier   begin     0    159986    255826         2        0
+    85324000 barrier   end       0    159987    255826         1        0
+    ...
+# 18 sync records
+```
+
+Per-region deltas repeat exactly across rounds (18,015 instructions and ~29,985
+dependencies per parallel region; 1,815 / ~3,050 per critical). That invariant
+is what the arbiter depends on.
+
+## FS mode: blocked on a disk image
+
+Step 3's machinery is mode-independent - the probe fires wherever the m5 op
+executes, SE or FS. Running it on real PARSEC needs FS mode, and the x86 disk
+this repo used (`/mnt/sim/x86-parsec-1.0.0`, referenced from
+`config/bench/x86-parsec.py`) is no longer mounted. The kernel is still present
+at `images/kernel/x86-linux-6.8.0-52`.

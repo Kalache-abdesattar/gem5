@@ -44,6 +44,7 @@
 #include "cpu/reg_class.hh"
 #include "debug/ElasticTrace.hh"
 #include "mem/packet.hh"
+#include "proto/sync_event.pb.h"
 
 namespace gem5
 {
@@ -59,6 +60,8 @@ ElasticTrace::ElasticTrace(const ElasticTraceParams &params)
        depWindowSize(params.depWindowSize),
        dataTraceStream(nullptr),
        instTraceStream(nullptr),
+       syncTraceStream(nullptr),
+       numDepRecords(0),
        startTraceInst(params.startTraceInst),
        allProbesReg(false),
        traceVirtAddr(params.traceVirtAddr),
@@ -96,6 +99,13 @@ ElasticTrace::ElasticTrace(const ElasticTraceParams &params)
     data_rec_header.set_tick_freq(sim_clock::Frequency);
     data_rec_header.set_window_size(depWindowSize);
     dataTraceStream->write(data_rec_header);
+    // Third trace: synchronisation events (ElasticSimMATE).
+    filename = simout.resolve(name() + ".sync.trace.gz");
+    syncTraceStream = new ProtoOutputStream(filename);
+    ProtoMessage::SyncEventHeader sync_header;
+    sync_header.set_obj_id(name());
+    sync_header.set_tick_freq(sim_clock::Frequency);
+    syncTraceStream->write(sync_header);
     // Register a callback to flush trace records and close the output streams.
     registerExitCallback([this]() {  flushTraces(); });
 }
@@ -139,6 +149,8 @@ ElasticTrace::regEtraceListeners()
         this, "Squash", &ElasticTrace::addSquashedInst);
     connectListener<ProbeListenerArg<ElasticTrace, DynInstPtr>>(
         this, "Commit", &ElasticTrace::addCommittedInst);
+    connectListener<ProbeListenerArg<ElasticTrace, SyncEventInfo>>(
+        this, "SyncEvent", &ElasticTrace::recordSyncEvent);
     allProbesReg = true;
 }
 
@@ -863,6 +875,7 @@ ElasticTrace::writeDepTrace(uint32_t num_to_write)
             }
             // Write the message to the protobuf output stream
             dataTraceStream->write(dep_pkt);
+            ++numDepRecords;
         } else {
             // Don't write the node to the trace but note that we have filtered
             // out a node.
@@ -911,6 +924,27 @@ ElasticTrace::TraceInfo::typeToStr() const
 }
 
 void
+ElasticTrace::recordSyncEvent(const SyncEventInfo &info)
+{
+    if (!syncTraceStream)
+        return;
+    ProtoMessage::SyncEvent ev;
+    ev.set_tick(curTick());
+    ev.set_pc(cpu->getContext(0)->pcState().instAddr());
+    ev.set_tid(info.threadid);
+    ev.set_is_end(info.isEnd ? 1 : 0);
+    // Low bits of workid carry the event class: 0 parallel, 1 critical,
+    // 2 barrier.  The rest is a caller-supplied region id.
+    ev.set_type(static_cast<uint32_t>(info.workid & 0xff));
+    ev.set_num_insts(cpu->getContext(0)->getCurrentInstCount());
+    ev.set_num_deps(numDepRecords);
+    syncTraceStream->write(ev);
+    DPRINTFR(ElasticTrace, "Sync %s workid %llu tid %llu insts %llu deps %llu\n",
+             info.isEnd ? "end" : "begin", info.workid, info.threadid,
+             ev.num_insts(), ev.num_deps());
+}
+
+void
 ElasticTrace::flushTraces()
 {
     // Idempotent: gem5 can run exit callbacks more than once, and with one
@@ -926,6 +960,8 @@ ElasticTrace::flushTraces()
     dataTraceStream = nullptr;
     delete instTraceStream;
     instTraceStream = nullptr;
+    delete syncTraceStream;
+    syncTraceStream = nullptr;
 }
 
 } // namespace o3

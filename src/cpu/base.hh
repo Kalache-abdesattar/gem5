@@ -55,6 +55,7 @@
 #include "sim/eventq.hh"
 #include "sim/full_system.hh"
 #include "sim/insttracer.hh"
+#include "cpu/sync_event.hh"
 #include "sim/probe/pmu.hh"
 #include "sim/probe/probe.hh"
 #include "sim/signal.hh"
@@ -242,6 +243,15 @@ class BaseCPU : public ClockedObject
 
     inline void workItemBegin() { baseStats.numWorkItemsStarted++; }
     inline void workItemEnd() { baseStats.numWorkItemsCompleted++; }
+
+    /** Notify the "SyncEvent" probe point. Called from the workbegin/workend
+     *  pseudo-instructions; ElasticTrace listens to build the synchronisation
+     *  trace used by configs/trace_sim/. */
+    void notifySyncEvent(const SyncEventInfo &info)
+    {
+        if (ppSyncEvent)
+            ppSyncEvent->notify(info);
+    }
     // @todo remove me after debugging with legion done
     Tick instCount() { return instCnt; }
 
@@ -571,6 +581,10 @@ class BaseCPU : public ClockedObject
      * remaining threadContexts are disabled.
      */
     ProbePointArg<bool> *ppSleeping;
+
+    /** Notified by the workbegin/workend pseudo-instructions; consumed by
+     *  ElasticTrace to build the synchronisation trace. */
+    ProbePointArg<SyncEventInfo> *ppSyncEvent;
     /** @} */
 
     enum CPUState

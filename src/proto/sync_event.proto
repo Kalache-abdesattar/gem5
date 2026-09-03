@@ -1,0 +1,29 @@
+// Synchronisation event trace, per ElasticSimMATE (Nocua et al., ReCoSoC 2017).
+// One file per core, alongside the Elastic Traces instruction and dependency
+// traces. Consumers diff consecutive records to obtain the instruction and
+// dependency counts of each parallel region.
+
+syntax = "proto2";
+package ProtoMessage;
+
+message SyncEventHeader {
+  optional string obj_id = 1;
+  optional uint64 tick_freq = 2;
+}
+
+message SyncEvent {
+  // Tick at which the marker executed.
+  optional uint64 tick = 1;
+  // PC of the marker; identifies the region at replay.
+  optional uint64 pc = 2;
+  // Thread id supplied by the workload.
+  optional uint64 tid = 3;
+  // 0 = region begin, 1 = region end.
+  optional uint32 is_end = 4;
+  // Workload-supplied event class (0 parallel, 1 critical, 2 barrier).
+  optional uint32 type = 5;
+  // Instructions committed by this core when the marker executed.
+  optional uint64 num_insts = 6;
+  // Dependency records emitted by this core when the marker executed.
+  optional uint64 num_deps = 7;
+}
