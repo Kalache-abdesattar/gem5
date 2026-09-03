@@ -201,3 +201,65 @@ executes, SE or FS. Running it on real PARSEC needs FS mode, and the x86 disk
 this repo used (`/mnt/sim/x86-parsec-1.0.0`, referenced from
 `config/bench/x86-parsec.py`) is no longer mounted. The kernel is still present
 at `images/kernel/x86-linux-6.8.0-52`.
+
+## Option B: SimMATE-style injection from Pin traces
+
+Skips `TraceCPU` entirely. The trace is the *fabric-visible* traffic (L1 misses
+and writebacks) captured on real hardware by the `l1filter` Pin tool, replayed
+through a fully simulated cache/interconnect/memory by traffic generators
+standing in for cores.
+
+No CPU timing is modelled, and crucially none is *invented*: the elastic-trace
+path needs a `comp_delay` per dependency edge, derived from O3 pipeline
+timestamps (`executeTick`/`toCommitTick`/`commitTick`), which Pin cannot
+produce. This path does not need it.
+
+```
+# 1. capture on real hardware (~100 MIPS, not a simulator)
+pin -t ~/fedora/pintools/l1filter/obj-intel64/l1filter.so \
+    -roi 1 -o fabric.trace -- <binary> <args>
+
+# 2. convert to gem5 packet.proto (needs the protobuf venv)
+protoc --python_out=<pb2dir> -I src/proto src/proto/packet.proto
+python configs/trace_sim/l1filter_to_packets.py fabric.trace out/ --pb2-dir <pb2dir>
+
+# 3. inject
+build/X86_CHI/gem5.opt --outdir=m5out/inject configs/trace_sim/inject.py \
+    --trace-dir out/ --elastic
+```
+
+### Address remapping is mandatory
+
+Pin emits host **virtual** addresses (observed up to `0x7fff8629fc40`, ~140 TB).
+They fall outside any sane gem5 memory range and `BaseTrafficGen` **silently
+suppresses** them -- the first run completed "successfully" with
+`numPackets 0` and `numSuppressed 50000`. Check `numSuppressed` before trusting
+any injection run.
+
+`--remap page` (default) assigns each unique 4 KiB virtual page a compact
+physical frame, preserving the page offset. That is what an OS does; intra-page
+locality and line offsets survive. The mapping is **shared across all threads**
+-- remapping per thread would destroy exactly the sharing that makes the trace
+worth replaying. Cache index bits above bit 11 differ from the host, as they do
+on any physically-indexed cache.
+
+### Verified
+
+blackscholes, 50k records, 2 threads, page-remapped into a 1.4 MiB footprint:
+
+```
+system.gen0.numPackets       327     numSuppressed 0
+system.gen1.numPackets     49673     numSuppressed 0
+system.l2.overallAccesses  35238
+system.l2.overallMisses     1692
+```
+
+### Later: upgrading this to ElasticSimMATE
+
+The planned route is to emit the elastic-trace format from Pin with a
+**synthesised** `comp_delay` (a constant, or an opcode-latency table). Pin can
+supply the dependency graph -- `reg_dep` via last-writer tracking per register,
+`rob_dep` via last-store-per-address -- but not the edge weights. That variant
+must be labelled as a synthetic in-order timing model, not as Elastic Traces:
+the +0.1% accuracy figure above belongs to gem5-captured traces and does not
+transfer.

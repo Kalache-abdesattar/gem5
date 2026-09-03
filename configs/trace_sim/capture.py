@@ -40,6 +40,10 @@ def parse_args():
     p.add_argument("--cmd", required=True, help="workload binary")
     p.add_argument("--options", default="", help="workload arguments")
     p.add_argument("--num-cores", type=int, default=1)
+    p.add_argument("--threaded", action="store_true",
+                   help="run ONE multithreaded process across all cores "
+                        "(pthreads land on free thread contexts) instead of "
+                        "one independent process per core")
     p.add_argument("--cpu-clock", default="2GHz")
     p.add_argument("--mem-size", default="512MB")
     p.add_argument("--l1i-size", default="32kB")
@@ -166,12 +170,23 @@ def main():
 
     proc_args = args.options.split() if args.options else []
     system.workload = SEWorkload.init_compatible(args.cmd)
-    for i, cpu in enumerate(system.cpu):
-        p = Process(pid=100 + i)
-        p.executable = args.cmd
-        p.cmd = [args.cmd] + proc_args
-        cpu.workload = p
-        cpu.createThreads()
+    if args.threaded:
+        # One process, N thread contexts. pthread_create clones onto the free
+        # contexts, which is how a real multithreaded workload runs -- and a
+        # different path from N independent processes.
+        proc = Process(pid=100)
+        proc.executable = args.cmd
+        proc.cmd = [args.cmd] + proc_args
+        for cpu in system.cpu:
+            cpu.workload = proc
+            cpu.createThreads()
+    else:
+        for i, cpu in enumerate(system.cpu):
+            proc = Process(pid=100 + i)
+            proc.executable = args.cmd
+            proc.cmd = [args.cmd] + proc_args
+            cpu.workload = proc
+            cpu.createThreads()
 
     # Must happen before instantiate(): probes are SimObjects too.
     if args.no_etrace:
