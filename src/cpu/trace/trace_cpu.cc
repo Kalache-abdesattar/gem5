@@ -1486,29 +1486,64 @@ TraceCPU::initSyncTrace(const std::string &filename)
 void
 TraceCPU::checkSyncPoint()
 {
-    if (!syncEnabled || syncStalled)
-        return;
-    if (nextSyncIdx >= syncPoints.size()) {
-        // Trace exhausted: stop holding up everyone else.
-        if (syncEnabled) {
+    // Loop: several boundaries can fall between two dcache events (a critical
+    // section with few ops inside, for instance), and the non-blocking ones
+    // must not be left pending.
+    while (!syncStalled) {
+        if (!syncEnabled)
+            return;
+        if (nextSyncIdx >= syncPoints.size()) {
             syncEnabled = false;
             arbiter->retire(arbiterId);
+            return;
         }
-        return;
-    }
-    if (traceStats.numOps.value() < syncPoints[nextSyncIdx].numInsts)
-        return;
+        const SyncPoint &sp = syncPoints[nextSyncIdx];
+        if (traceStats.numOps.value() < sp.numInsts)
+            return;
+        ++nextSyncIdx;
 
-    ++nextSyncIdx;
-    ++syncBarriersHit;
+        switch (sp.type) {
+          case SYNC_CRITICAL:
+            if (!sp.isEnd) {
+                // Mutual exclusion, not a rendezvous. Only stall if the lock
+                // is already held.
+                if (!arbiter->acquire(arbiterId)) {
+                    stallForSync("critical (queued)");
+                }
+            } else {
+                arbiter->releaseLock(arbiterId);
+            }
+            break;
+
+          case SYNC_BARRIER:
+            stallForSync("barrier");
+            arbiter->arrive(arbiterId);
+            break;
+
+          case SYNC_PARALLEL:
+          default:
+            // A parallel region carries an implicit barrier at its end; its
+            // start is just a marker and must not block.
+            if (sp.isEnd) {
+                stallForSync("parallel end");
+                arbiter->arrive(arbiterId);
+            }
+            break;
+        }
+    }
+}
+
+void
+TraceCPU::stallForSync(const char *why)
+{
     syncStalled = true;
     stalledPendingTick = MaxTick;
     if (dcacheNextEvent.scheduled())
         deschedule(dcacheNextEvent);
-    DPRINTF(TraceCPUData, "Reached sync point %llu at %llu ops; waiting.\n",
+    ++syncBarriersHit;
+    DPRINTF(TraceCPUData, "Sync stall (%s) at point %llu, %llu ops.\n", why,
             (unsigned long long)nextSyncIdx,
             (unsigned long long)traceStats.numOps.value());
-    arbiter->arrive(arbiterId);
 }
 
 void

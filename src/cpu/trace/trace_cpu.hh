@@ -212,6 +212,12 @@ class TraceCPU : public ClockedObject
     /** Called after each batch of replayed ops; stalls at a boundary. */
     void checkSyncPoint();
 
+    /** Park the D-side until the arbiter releases us. */
+    void stallForSync(const char *why);
+
+    /** Event classes recorded by the workbegin/workend markers. */
+    enum SyncType { SYNC_PARALLEL = 0, SYNC_CRITICAL = 1, SYNC_BARRIER = 2 };
+
     struct SyncPoint
     {
         uint64_t numInsts;

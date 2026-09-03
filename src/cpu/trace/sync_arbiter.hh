@@ -1,6 +1,7 @@
 #ifndef __CPU_TRACE_SYNC_ARBITER_HH__
 #define __CPU_TRACE_SYNC_ARBITER_HH__
 
+#include <deque>
 #include <vector>
 
 #include "params/SyncArbiter.hh"
@@ -30,13 +31,30 @@ class SyncArbiter : public SimObject
     /** Called once per TraceCPU at init. Returns the participant id. */
     unsigned registerCpu(TraceCPU *cpu);
 
-    /** A TraceCPU has reached a synchronisation point. */
+    /** A TraceCPU has reached a barrier. Blocks until all participants do. */
     void arrive(unsigned id);
+
+    /**
+     * Enter a critical section. Returns true if the lock was free and the
+     * caller may proceed immediately; false if it was queued, in which case
+     * the caller must stall and will be released via releaseFromSync().
+     *
+     * A critical section is mutual exclusion, not a rendezvous: treating it as
+     * a barrier would serialise every thread at every lock and systematically
+     * over-serialise lock-heavy workloads.
+     */
+    bool acquire(unsigned id);
+
+    /** Leave a critical section, handing the lock to the next waiter. */
+    void releaseLock(unsigned id);
 
     /** A TraceCPU's trace is exhausted; stop expecting it at barriers. */
     void retire(unsigned id);
 
     unsigned numRegistered() const { return participants.size(); }
+
+    uint64_t numBarriers() const { return barriersReleased; }
+    uint64_t numCriticalGrants() const { return criticalGrants; }
 
   private:
     void releaseAll();
@@ -48,6 +66,11 @@ class SyncArbiter : public SimObject
     unsigned numArrived;
     unsigned numActive;
     uint64_t barriersReleased;
+
+    /* Critical-section lock: -1 when free, else the holding participant. */
+    int lockHolder;
+    std::deque<unsigned> lockQueue;
+    uint64_t criticalGrants;
 };
 
 } // namespace gem5

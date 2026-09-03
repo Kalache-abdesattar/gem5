@@ -12,7 +12,9 @@ SyncArbiter::SyncArbiter(const Params &params)
       expected(params.num_cpus),
       numArrived(0),
       numActive(0),
-      barriersReleased(0)
+      barriersReleased(0),
+      lockHolder(-1),
+      criticalGrants(0)
 {
 }
 
@@ -58,11 +60,52 @@ SyncArbiter::retire(unsigned id)
         arrived[id] = false;
         --numArrived;
     }
+    if (lockHolder == (int)id)
+        releaseLock(id);
     DPRINTF(TraceCPUData, "SyncArbiter: cpu %u retired, %u active\n",
             id, numActive);
     const unsigned target = expected ? expected : numActive;
     if (numActive > 0 && numArrived >= target)
         releaseAll();
+}
+
+bool
+SyncArbiter::acquire(unsigned id)
+{
+    assert(id < participants.size());
+    if (lockHolder < 0) {
+        lockHolder = (int)id;
+        ++criticalGrants;
+        DPRINTF(TraceCPUData, "SyncArbiter: cpu %u entered critical\n", id);
+        return true;
+    }
+    DPRINTF(TraceCPUData, "SyncArbiter: cpu %u queued on critical (held by %d)\n",
+            id, lockHolder);
+    lockQueue.push_back(id);
+    return false;
+}
+
+void
+SyncArbiter::releaseLock(unsigned id)
+{
+    if (lockHolder != (int)id) {
+        // Can happen if a CPU retires mid-section; nothing to hand over.
+        return;
+    }
+    lockHolder = -1;
+    while (!lockQueue.empty()) {
+        const unsigned next = lockQueue.front();
+        lockQueue.pop_front();
+        if (!active[next])
+            continue;
+        lockHolder = (int)next;
+        ++criticalGrants;
+        DPRINTF(TraceCPUData, "SyncArbiter: cpu %u handed critical to %u\n",
+                id, next);
+        participants[next]->releaseFromSync();
+        return;
+    }
+    DPRINTF(TraceCPUData, "SyncArbiter: cpu %u left critical, now free\n", id);
 }
 
 void

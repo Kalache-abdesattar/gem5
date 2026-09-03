@@ -373,11 +373,44 @@ only because both cores replay *identical* traces and stay in lockstep, so the
 barriers rarely bite. Asymmetric traces or asymmetric cache configurations are
 where this starts to matter.
 
+### Region semantics
+
+Each recorded boundary is dispatched on its type rather than all being treated
+as barriers:
+
+| type | begin | end |
+|---|---|---|
+| parallel (0) | no stall -- just a marker | **barrier** (a parallel region carries an implicit barrier at its end) |
+| critical (1) | **acquire** the arbiter's lock; stall only if held | **release**, handing it to the next waiter |
+| barrier (2) | **barrier** | **barrier** |
+
+Treating a critical section as a barrier would rendezvous every thread at every
+lock and systematically over-serialise lock-heavy workloads -- `dedup` (22k
+spinlocks) and `fluidanimate` (2.2M mutex ops) would be badly distorted.
+
+`checkSyncPoint()` loops rather than handling one boundary per dcache event,
+because the non-blocking cases (parallel begin, uncontended acquire, release)
+can fall several-to-a-batch and must not be left pending.
+
+Verified on 2 cores:
+
+```
+215034500: SyncArbiter: cpu 1 entered critical
+215054000: SyncArbiter: cpu 0 queued on critical (held by 1)
+215054000: cpu0: Sync stall (critical (queued)) at point 3, 158192 ops.
+216445000: SyncArbiter: cpu 1 handed critical to 0
+217709500: SyncArbiter: cpu 0 left critical, now free
+235049000: SyncArbiter: cpu 0 entered critical      <- roles swap next round
+235137000: SyncArbiter: cpu 1 queued on critical (held by 0)
+```
+
+Counts: 6 barriers released, 8 barrier stalls + 4 parallel-end stalls (= 6
+barriers across 2 CPUs), 4 critical grants of which 2 were contended. A CPU
+that retires while holding the lock hands it on rather than deadlocking the
+queue.
+
 ### Still missing from the paper
 
 * **Trace replication N -> M** for weak-scaling studies (paper section III-A4b).
 * The Pin path (`pintools/etrace`) records no sync events, so it cannot feed
   the arbiter yet -- it would need to hook the same workbegin/workend markers.
-* Region *type* (parallel / critical / barrier) is parsed but not acted on:
-  every boundary is treated as a full barrier. Critical sections should be
-  mutual exclusion, not a rendezvous.
