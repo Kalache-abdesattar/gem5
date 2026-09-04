@@ -32,6 +32,11 @@ def parse_args():
                    help="0 = one injector per cpuN.trace.gz found")
     p.add_argument("--clock", default="2GHz")
     p.add_argument("--mem-size", default="4GB")
+    p.add_argument("--l1d", action="store_true",
+                   help="model an L1 in front of each injector. Correct ONLY "
+                        "for an unfiltered trace (l1filter -nofilter 1). A "
+                        "default l1filter trace is already the L1 miss stream, "
+                        "so adding an L1 here filters twice.")
     p.add_argument("--l1d-size", default="32kB")
     p.add_argument("--l2-size", default="1MB")
     p.add_argument("--no-l2", action="store_true")
@@ -102,13 +107,27 @@ def main():
         system.l2.cpu_side = system.l2bus.mem_side_ports
         system.l2.mem_side = system.membus.cpu_side_ports
 
+    # An l1filter trace IS the L1 miss stream, so the simulated hierarchy
+    # starts *below* the L1. Inserting another L1 here filters twice: the
+    # first run of this config absorbed ~30% of already-filtered traffic and
+    # reported 35238 L2 accesses for 50000 injected packets.
     for i, gen in enumerate(system.gen):
-        gen.l1d = L1D(size=args.l1d_size)
-        gen.port = gen.l1d.cpu_side
-        if args.no_l2:
-            gen.l1d.mem_side = system.membus.cpu_side_ports
+        if args.l1d:
+            gen.l1d = L1D(size=args.l1d_size)
+            gen.port = gen.l1d.cpu_side
+            upstream = gen.l1d
         else:
-            gen.l1d.mem_side = system.l2bus.cpu_side_ports
+            upstream = gen
+        if args.no_l2:
+            if args.l1d:
+                upstream.mem_side = system.membus.cpu_side_ports
+            else:
+                gen.port = system.membus.cpu_side_ports
+        else:
+            if args.l1d:
+                upstream.mem_side = system.l2bus.cpu_side_ports
+            else:
+                gen.port = system.l2bus.cpu_side_ports
 
     system.mem_ctrl = MemCtrl()
     system.mem_ctrl.dram = DDR4_2400_8x8()
@@ -128,7 +147,11 @@ def main():
         gen.start(replay(gen, path))
 
     print(f"[trace_sim] elastic={args.elastic} "
-          f"max_outstanding={args.max_outstanding}")
+          f"max_outstanding={args.max_outstanding} "
+          f"l1d={'modelled here' if args.l1d else 'not modelled'}")
+    print("[trace_sim] NOTE: use --l1d only with an UNFILTERED trace "
+          "(l1filter -nofilter 1). A default l1filter trace is already the L1\n"
+          "[trace_sim]       miss stream; adding an L1 here filters twice.")
     exit_event = m5.simulate()
     print(f"[trace_sim] done @ tick {m5.curTick()}: {exit_event.getCause()}")
 

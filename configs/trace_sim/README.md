@@ -414,3 +414,46 @@ queue.
 * **Trace replication N -> M** for weak-scaling studies (paper section III-A4b).
 * The Pin path (`pintools/etrace`) records no sync events, so it cannot feed
   the arbiter yet -- it would need to hook the same workbegin/workend markers.
+
+
+## Filtering: capture unfiltered, let gem5 model the L1
+
+The first version of `inject.py` put an L1 in front of every injector while
+feeding it an `l1filter` trace -- which is *already* the L1 miss stream. That
+double-filters: 50,000 injected packets produced only 35,238 L2 accesses,
+because a second L1 absorbed ~30% of traffic that had already survived one.
+
+Removing the L1 turned out to be the wrong fix. `BaseTrafficGen` connected
+directly to a crossbar trips
+`assert(retryPktTick != 0)` in `retryReq()` -- a gem5 bug in the retry path
+(`retryPkt` non-null with `retryPktTick` already zeroed) that an intervening
+L1 had been masking. It reproduces with and without `--elastic`, with L2 and
+without, and with `max_outstanding_reqs = 0`.
+
+The correct arrangement, which also avoids that bug:
+
+```
+pin -t l1filter.so -nofilter 1 -roi 1 -o unfiltered.trace -- <binary>
+python configs/trace_sim/l1filter_to_packets.py unfiltered.trace out/ --pb2-dir <d>
+gem5.opt configs/trace_sim/inject.py --trace-dir out/ --elastic --l1d
+```
+
+`-nofilter 1` emits every line reference rather than only misses, so gem5's own
+L1 decides what reaches the fabric. That is strictly better for the intended
+studies: with a pre-filtered trace the L1 is frozen at whatever Pin modelled,
+so L1 sizing cannot be swept at all.
+
+Cost: traces are much larger. blackscholes simsmall is 153M line references
+against ~207k L1-filtered records, so bound captures with `-max`.
+
+Verified, 400k unfiltered references, 3 threads:
+
+```
+system.gen1.numPackets              200697
+system.gen1.l1d.overallAccesses     200697
+system.gen1.l1d.overallMisses         1845   <- gem5's L1 doing the filtering
+system.gen*.numSuppressed                0
+```
+
+**Rule:** `--l1d` only with `-nofilter 1`. Default `l1filter` traces go
+straight into the hierarchy below the L1.
