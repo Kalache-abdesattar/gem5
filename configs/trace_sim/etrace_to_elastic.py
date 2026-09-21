@@ -71,6 +71,11 @@ def main():
     ap.add_argument("--page-size", type=int, default=4096)
     ap.add_argument("--phys-base", type=lambda x: int(x, 0), default=1 << 20)
     ap.add_argument("--max-records", type=int, default=0)
+    ap.add_argument("--private-remap", action="store_true",
+                    help="give each thread its own frame pool, destroying all "
+                         "inter-thread sharing. Diagnostic only: it makes the "
+                         "trace unrepresentative, but isolates whether a "
+                         "failure depends on shared lines.")
     args = ap.parse_args()
 
     sys.path.insert(0, args.pb2_dir)
@@ -86,8 +91,10 @@ def main():
     pgmask = args.page_size - 1
     frames = {}
 
+    cur_cpu = [0]
+
     def remap(a):
-        vpn = a >> pgshift
+        vpn = (a >> pgshift, cur_cpu[0]) if args.private_remap else (a >> pgshift)
         f = frames.get(vpn)
         if f is None:
             f = args.phys_base + (len(frames) << pgshift)
@@ -103,6 +110,7 @@ def main():
         sys.exit(f"no *.tidN.txt in {args.indir}")
 
     for cpu, path in enumerate(files):
+        cur_cpu[0] = cpu
         obj = f"etrace.cpu{cpu}"
         ipath = os.path.join(args.outdir, f"cpu{cpu}.inst.trace.gz")
         dpath = os.path.join(args.outdir, f"cpu{cpu}.data.trace.gz")

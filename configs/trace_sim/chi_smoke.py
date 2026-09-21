@@ -36,6 +36,8 @@ def main():
     p.add_argument("--num-cores", type=int, default=1)
     p.add_argument("--mem-size", default="512MB")
     p.add_argument("--maxinsts", type=int, default=100000)
+    p.add_argument("--hierarchy", choices=("gem5-chi","repo-l3"),
+                   default="gem5-chi")
     args = p.parse_args()
 
     if not os.path.isfile(args.cmd):
@@ -56,14 +58,17 @@ def main():
         if args.maxinsts:
             cpu.max_insts_any_thread = args.maxinsts
 
-    l1_config, l2_config, l3_config = chi_cache_configs()
-
-    from config.chi.l3_cache_hierarchy import L3CacheHierarchy
-
-    hierarchy = L3CacheHierarchy(
-        l1_config=l1_config, l2_config=l2_config, l3_config=l3_config,
-        cores_per_cluster=1,
-    )
+    if args.hierarchy == "gem5-chi":
+        from gem5.components.cachehierarchies.chi.private_l1_cache_hierarchy \
+            import PrivateL1CacheHierarchy
+        hierarchy = PrivateL1CacheHierarchy(size="32KiB", assoc=8)
+    else:
+        l1_config, l2_config, l3_config = chi_cache_configs()
+        from config.chi.l3_cache_hierarchy import L3CacheHierarchy
+        hierarchy = L3CacheHierarchy(
+            l1_config=l1_config, l2_config=l2_config, l3_config=l3_config,
+            cores_per_cluster=1,
+        )
     board.cache_hierarchy = hierarchy
     hierarchy.incorporate_cache(board)
 

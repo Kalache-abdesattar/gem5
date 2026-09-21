@@ -521,72 +521,90 @@ wiped between sessions:
 * `~/fedora/pintools/workloads` -- marker-annotated demo workloads
 * `~/fedora/pintools/traces` -- captured and converted traces
 
-## CHI replay -- WORK IN PROGRESS
+## CHI replay -- narrowed to concurrent write sharing
 
-`replay_chi.py` + `trace_board.py` attach TraceCPUs to a Ruby/CHI hierarchy.
-`chi_smoke.py` is the diagnostic that drives the same board with a real CPU.
+`replay_chi.py` (TraceCPU), `inject_chi.py` (traffic generators) and
+`chi_smoke.py` (real CPU, diagnostic) all attach to a Ruby/CHI hierarchy via
+the `trace_board.py` shim.
 
 ### The shim
 
-`TraceCPU` is a `ClockedObject`, not a `BaseCPU`, so it is not an
-`AbstractCore`: no MMU, no interrupt controller, no page-table walker. The
-stdlib hierarchies need only a small surface, which `trace_board.py` supplies
-(core: `connect_icache`/`connect_dcache`/`connect_walker_ports`/
-`connect_interrupt`/`requires_send_evicts`/`is_kvm_core`/`get_isa`/
-`set_switched_out`/`get_mmu`; board: `get_processor`/`get_cache_line_size`/
-`get_clock_domain`/`get_mem_ports`/`has_io_bus`/`get_io_bus`/`has_dma_ports`/
-`get_dma_ports`/`connect_system_port`). `connect_walker_ports` and
-`connect_interrupt` no-op for a TraceCPU but wire a real CPU when one is
-present, so the same shim serves the smoke test.
-
-Interrupt wiring follows `base_cpu_core.py`: `interrupt_requestor` goes to
-**both** `pio` and `int_responder`, `interrupt_responce` to `int_requestor`.
-Getting that backwards gives "roles 'GEM5 REQUESTOR' and 'GEM5 REQUESTOR' are
-not compatible".
+`TraceCPU` is a `ClockedObject`, not a `BaseCPU`: no MMU, no interrupt
+controller, no page-table walker. `trace_board.py` supplies the small surface
+the stdlib hierarchies call and no-ops what does not apply, while still wiring
+a real CPU when one is present so the smoke test is meaningful. Interrupt
+wiring follows `base_cpu_core.py`: `interrupt_requestor` -> **both** `pio` and
+`int_responder`; `interrupt_responce` -> `int_requestor`. Reversing that gives
+"roles 'GEM5 REQUESTOR' and 'GEM5 REQUESTOR' are not compatible".
 
 ### Finding 1: config/chi/l3_cache_hierarchy.py does not work in SE mode
 
 Independent of anything here. A **stock stdlib `SimpleBoard` + `SimpleProcessor`**,
-with no shim involved, running `hello` on that hierarchy, panics:
+no shim involved, running `hello`:
 
 ```
-CHI-cache-ports.sm:117: assert((bitMask.count() <= data_channel_size) &&
-                               (bitMask.count() > 0))
-  machine: board.cache_hierarchy.core_clusters.dcache
-           .downstream_destinations.downstream_destinations   (the L3)
+CHI-cache-ports.sm:117: assert(bitMask.count() > 0)   at the L3
 ```
 
 Every existing consumer of that hierarchy (`config/bench/x86-parsec.py`,
 `x86-gabs.py`, `riscv-gabs.py`, `config/run/x86-ubuntu-run.py`) is FS mode, so
-the SE path appears never to have been exercised. Ruled out along the way:
-not the Pin traces (a gem5-captured trace fails identically), not request size
-(`data_channel_size` is 64, max access 32 B, none zero-length), not
-page-straddling from the converter's remapping (zero such accesses), not
-`requires_send_evicts` (fails either way).
+the SE path looks unexercised. `replay_chi.py` therefore defaults to
+`--hierarchy gem5-chi` (gem5's own `PrivateL1CacheHierarchy`, which works in
+SE); `--hierarchy repo-l3` still selects the repo one.
 
-`gem5`'s own `PrivateL1CacheHierarchy` (CHI) runs the same SE workload on 2
-cores without complaint, so CHI-in-SE is fine in general.
+### Finding 2: the failure needs concurrent *write sharing*
 
-### Finding 2: TraceCPU + CHI hits a chain of protocol asserts
+On the working hierarchy, bisected:
 
-With `--hierarchy gem5-chi` (the working one) and TraceCPUs instead of a real
-CPU:
+| client | cores | addresses | result |
+|---|---|---|---|
+| TimingSimpleCPU | 1 | - | OK |
+| TimingSimpleCPU | 2 | - | OK |
+| **TraceCPU** | **1** | - | **OK** |
+| TraceCPU | 2 | shared (real remap) | **assert** |
+| TraceCPU | 2 | disjoint (`--private-remap`) | **OK** |
+| PyTrafficGen | 3 | shared | **assert** (same one) |
+| TraceCPU | 2 | shared, `--sync` | assert |
+
+So it is not TraceCPU-specific (traffic generators fail identically), not the
+shim (a real CPU on the same board and hierarchy runs), and not core count
+alone (disjoint addresses at 2 cores are fine). **It needs two clients touching
+the same lines.**
+
+The asserts, in order:
 
 1. `CHI-cache-actions.sm:1616` -- `assert(use_DMT == false || reqType is
-   Atomic)` at `Send_ReadNoSnp`. The stdlib home node sets
-   `enable_DMT = True`; `--no-dmt` (default) turns it off.
-2. Then `CHI-cache-actions.sm:2463` -- a `CompData_UC`/`DataSepResp_UC`
-   arriving while the TBE already holds valid+dirty data.
+   Atomic)` at `Send_ReadNoSnp`. The stdlib home node sets `enable_DMT = True`;
+   `--no-dmt` (default) turns it off and moves past this.
+2. `CHI-cache-actions.sm:2463` -- `CompData_UC`/`DataSepResp_UC` arriving at
+   the HN-F while the TBE already holds valid **and** dirty data
+   (`assert(tbe.dataUnique == false)`, `assert((tbe.dataValid &&
+   tbe.dataDirty) == false)`).
 
-A `TimingSimpleCPU` on the identical hierarchy does not hit either, so this is
-specific to TraceCPU's request stream. `TraceCPU` is normally paired with
-classic caches (upstream `configs/example/etrace_replay.py` builds a classic
-hierarchy), so TraceCPU + Ruby/CHI looks like an unexercised combination.
+Enabling the arbiter (`--sync`) does **not** avoid it: barriers constrain
+region boundaries, not the accesses within a region, and the sharing that
+triggers this happens inside one.
 
-Next steps: run TraceCPU against another Ruby protocol (MOESI_CMP_directory is
-also built into X86_CHI) to tell "TraceCPU + Ruby" from "TraceCPU + CHI"; and
-compare the request flags TraceCPU sets against those a TimingSimpleCPU sets
-for the same access.
+`--private-remap` on `etrace_to_elastic.py` gives each thread its own frame
+pool. It is a **diagnostic only** -- it destroys the inter-thread sharing that
+makes a trace worth replaying -- but it isolates sharing as the trigger.
 
-Until this is resolved, **`replay.py` with classic caches is the working
-path**, and it is the one all the validated numbers in this file come from.
+### Reading this
+
+Two readings, and they are not yet distinguished:
+
+* a genuine race in gem5's CHI under concurrent write sharing, or
+* trace replay legitimately producing request interleavings a real core never
+  would (a TraceCPU writes a line whenever the trace says so, with no regard
+  for whether another core holds it), driving the HN-F into a state real
+  execution never reaches.
+
+The second is the more likely and is *inherent to open-loop replay*: the
+recorded stream carries no coherence ordering, so two replayed cores can issue
+a pattern that the original execution's coherence would have prevented. If so,
+the fix is not a gem5 patch but ordering constraints in the trace -- which is
+what a full ElasticSimMATE arbiter operating at access rather than region
+granularity would provide.
+
+**`replay.py` with classic caches remains the working path**, and every
+validated number in this file comes from it.

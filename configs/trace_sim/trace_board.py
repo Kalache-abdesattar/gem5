@@ -40,10 +40,18 @@ class TraceCore:
 
     # -- the four methods a stdlib cache hierarchy calls on a core ----------
     def connect_icache(self, port: Port) -> None:
-        self.core.icache_port = port
+        # A TrafficGen has a single `port` and no instruction side; the caller
+        # supplies a separate idle generator for the I-sequencer.
+        if hasattr(self.core, "icache_port"):
+            self.core.icache_port = port
+        else:
+            self.core.port = port
 
     def connect_dcache(self, port: Port) -> None:
-        self.core.dcache_port = port
+        if hasattr(self.core, "dcache_port"):
+            self.core.dcache_port = port
+        else:
+            self.core.port = port
 
     def connect_walker_ports(self, port1: Port, port2: Port) -> None:
         # A TraceCPU has no MMU: a replayed trace carries physical addresses
@@ -62,7 +70,12 @@ class TraceCore:
         #   interrupt_responce  -> int_requestor
         if not hasattr(self.core, "createInterruptController"):
             return
+        # BaseTrafficGen defines createInterruptController() as a no-op and
+        # never grows an `interrupts` vector, so check for the vector rather
+        # than the method.
         self.core.createInterruptController()
+        if not hasattr(self.core, "interrupts") or not self.core.interrupts:
+            return
         if interrupt_requestor is not None:
             self.core.interrupts[0].pio = interrupt_requestor
             self.core.interrupts[0].int_responder = interrupt_requestor
