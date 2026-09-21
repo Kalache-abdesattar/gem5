@@ -520,3 +520,55 @@ wiped between sessions:
 * `~/fedora/pintools/pbenv/pb2` -- generated `*_pb2.py`
 * `~/fedora/pintools/workloads` -- marker-annotated demo workloads
 * `~/fedora/pintools/traces` -- captured and converted traces
+
+## CHI replay -- WORK IN PROGRESS, does not run yet
+
+`replay_chi.py` + `trace_board.py` attach TraceCPUs to this repo's Ruby/CHI
+hierarchy (`config/chi/l3_cache_hierarchy.py`) instead of the classic L1/L2.
+
+### The shim
+
+`TraceCPU` is a `ClockedObject`, not a `BaseCPU`, so it is not an
+`AbstractCore`: no MMU, no interrupt controller, no page-table walker. The
+stdlib hierarchies need only a small surface, which `trace_board.py` supplies:
+
+* core: `connect_icache`, `connect_dcache`, `connect_walker_ports` (no-op -- a
+  replayed trace carries physical addresses and never walks),
+  `connect_interrupt` (no-op), `requires_send_evicts`, `is_kvm_core`,
+  `get_isa`, `set_switched_out`, `get_mmu`
+* board: `get_processor`, `get_cache_line_size`, `get_clock_domain`,
+  `get_mem_ports`, `has_io_bus`/`get_io_bus`, `has_dma_ports`/`get_dma_ports`,
+  `connect_system_port`
+
+The L1/L2/L3 dicts are lifted verbatim from `config/bench/x86-parsec.py` so a
+trace replay and a normal benchmark run model the same caches; diverging there
+would make the two incomparable.
+
+### Status: builds and starts, then asserts
+
+The hierarchy constructs, `m5.instantiate()` succeeds and the CHI protocol
+runs. It then fails with:
+
+```
+CHI-cache-ports.sm:117: assert failure for machine
+  ...core_clusters.dcache.downstream_destinations.downstream_destinations
+```
+
+which is `assert((bitMask.count() <= data_channel_size) && (bitMask.count() > 0))`
+on the L3's data-in port -- a data message with a zero-length bitmask.
+
+What has been ruled out:
+
+* **Not the Pin traces.** It reproduces identically with a gem5-captured
+  trace (`m5out/capture`), so it is the hierarchy setup, not the trace.
+* **Not request size.** `data_channel_size` is 64 everywhere in `config/chi`;
+  the traces' largest access is 32 B, and none is zero-length.
+* **Not page-straddling from the converter's remapping.** Zero accesses in the
+  trace cross a 4 KiB boundary (one crosses a cache line, which TraceCPU
+  splits normally).
+* **Not `requires_send_evicts`.** Fails the same with it true and false.
+
+Next things to try: whether `RubySequencer`/`num_of_sequencers` accounting is
+right when the "cores" are not real CPUs; whether the L3 slice address ranges
+cover `TraceBoard.mem_ranges`; and running the same hierarchy with a
+`TimingSimpleCPU` through this board to separate the shim from `TraceCPU`.
