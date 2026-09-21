@@ -42,12 +42,15 @@ def parse_args():
     p.add_argument("--l2-size", default="256kB")
     p.add_argument("--l3-size", default="1MB")
     p.add_argument("--cores-per-cluster", type=int, default=1)
-    p.add_argument("--hierarchy", choices=("gem5-chi", "repo-l3"),
-                   default="gem5-chi",
-                   help="gem5-chi = gem5's stdlib CHI PrivateL1CacheHierarchy "
-                        "(works in SE mode). repo-l3 = config/chi/"
-                        "l3_cache_hierarchy.py, which currently asserts in SE "
-                        "mode -- see the README; it is only exercised in FS.")
+    p.add_argument("--hierarchy", choices=("gem5-chi-l2", "gem5-chi-l1",
+                                          "repo-l3"),
+                   default="gem5-chi-l2",
+                   help="gem5-chi-l2 = stdlib PrivateL1SharedL2CacheHierarchy "
+                        "(the only one that survives concurrent write sharing). "
+                        "gem5-chi-l1 = stdlib PrivateL1CacheHierarchy, which "
+                        "asserts under sharing even for gem5's own MemTest. "
+                        "repo-l3 = config/chi/l3_cache_hierarchy.py, broken in "
+                        "SE mode. See the README.")
     p.add_argument("--no-dmt", action="store_true", default=True,
                    help="disable Direct Memory Transfer on the home node "
                         "(required for TraceCPU; see README)")
@@ -233,7 +236,14 @@ def main():
         for cpu in cpus:
             cpu.arbiter = board.arbiter
 
-    if args.hierarchy == "gem5-chi":
+    if args.hierarchy == "gem5-chi-l2":
+        from gem5.components.cachehierarchies.chi\
+            .private_l1_shared_l2_cache_hierarchy \
+            import PrivateL1SharedL2CacheHierarchy
+        hierarchy = PrivateL1SharedL2CacheHierarchy(
+            l1_size=args.l1_size, l1_assoc=8,
+            l2_size=args.l2_size, l2_assoc=8)
+    elif args.hierarchy == "gem5-chi-l1":
         from gem5.components.cachehierarchies.chi.private_l1_cache_hierarchy \
             import PrivateL1CacheHierarchy
         hierarchy = PrivateL1CacheHierarchy(size=args.l1_size, assoc=8)
