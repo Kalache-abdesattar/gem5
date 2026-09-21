@@ -46,12 +46,28 @@ class TraceCore:
         self.core.dcache_port = port
 
     def connect_walker_ports(self, port1: Port, port2: Port) -> None:
-        # No MMU: a replayed trace carries physical addresses and never walks.
-        pass
+        # A TraceCPU has no MMU: a replayed trace carries physical addresses
+        # and never walks. A real CPU wrapped for the CHI smoke test does,
+        # so wire it when present.
+        mmu = getattr(self.core, "mmu", None)
+        if mmu is not None and hasattr(mmu, "connectWalkerPorts"):
+            mmu.connectWalkerPorts(port1, port2)
 
-    def connect_interrupt(self, *args, **kwargs) -> None:
-        # No interrupt controller: nothing can interrupt a trace replay.
-        pass
+    def connect_interrupt(self, interrupt_requestor=None,
+                          interrupt_responce=None) -> None:
+        # TraceCPU has no interrupt controller. A real CPU does, and on x86
+        # the APIC must be wired. Mapping per
+        # gem5/components/processors/base_cpu_core.py:
+        #   interrupt_requestor -> pio and int_responder
+        #   interrupt_responce  -> int_requestor
+        if not hasattr(self.core, "createInterruptController"):
+            return
+        self.core.createInterruptController()
+        if interrupt_requestor is not None:
+            self.core.interrupts[0].pio = interrupt_requestor
+            self.core.interrupts[0].int_responder = interrupt_requestor
+        if interrupt_responce is not None:
+            self.core.interrupts[0].int_requestor = interrupt_responce
 
     # -- occasionally probed by stdlib helpers -----------------------------
     def requires_send_evicts(self) -> bool:

@@ -521,54 +521,72 @@ wiped between sessions:
 * `~/fedora/pintools/workloads` -- marker-annotated demo workloads
 * `~/fedora/pintools/traces` -- captured and converted traces
 
-## CHI replay -- WORK IN PROGRESS, does not run yet
+## CHI replay -- WORK IN PROGRESS
 
-`replay_chi.py` + `trace_board.py` attach TraceCPUs to this repo's Ruby/CHI
-hierarchy (`config/chi/l3_cache_hierarchy.py`) instead of the classic L1/L2.
+`replay_chi.py` + `trace_board.py` attach TraceCPUs to a Ruby/CHI hierarchy.
+`chi_smoke.py` is the diagnostic that drives the same board with a real CPU.
 
 ### The shim
 
 `TraceCPU` is a `ClockedObject`, not a `BaseCPU`, so it is not an
 `AbstractCore`: no MMU, no interrupt controller, no page-table walker. The
-stdlib hierarchies need only a small surface, which `trace_board.py` supplies:
+stdlib hierarchies need only a small surface, which `trace_board.py` supplies
+(core: `connect_icache`/`connect_dcache`/`connect_walker_ports`/
+`connect_interrupt`/`requires_send_evicts`/`is_kvm_core`/`get_isa`/
+`set_switched_out`/`get_mmu`; board: `get_processor`/`get_cache_line_size`/
+`get_clock_domain`/`get_mem_ports`/`has_io_bus`/`get_io_bus`/`has_dma_ports`/
+`get_dma_ports`/`connect_system_port`). `connect_walker_ports` and
+`connect_interrupt` no-op for a TraceCPU but wire a real CPU when one is
+present, so the same shim serves the smoke test.
 
-* core: `connect_icache`, `connect_dcache`, `connect_walker_ports` (no-op -- a
-  replayed trace carries physical addresses and never walks),
-  `connect_interrupt` (no-op), `requires_send_evicts`, `is_kvm_core`,
-  `get_isa`, `set_switched_out`, `get_mmu`
-* board: `get_processor`, `get_cache_line_size`, `get_clock_domain`,
-  `get_mem_ports`, `has_io_bus`/`get_io_bus`, `has_dma_ports`/`get_dma_ports`,
-  `connect_system_port`
+Interrupt wiring follows `base_cpu_core.py`: `interrupt_requestor` goes to
+**both** `pio` and `int_responder`, `interrupt_responce` to `int_requestor`.
+Getting that backwards gives "roles 'GEM5 REQUESTOR' and 'GEM5 REQUESTOR' are
+not compatible".
 
-The L1/L2/L3 dicts are lifted verbatim from `config/bench/x86-parsec.py` so a
-trace replay and a normal benchmark run model the same caches; diverging there
-would make the two incomparable.
+### Finding 1: config/chi/l3_cache_hierarchy.py does not work in SE mode
 
-### Status: builds and starts, then asserts
-
-The hierarchy constructs, `m5.instantiate()` succeeds and the CHI protocol
-runs. It then fails with:
+Independent of anything here. A **stock stdlib `SimpleBoard` + `SimpleProcessor`**,
+with no shim involved, running `hello` on that hierarchy, panics:
 
 ```
-CHI-cache-ports.sm:117: assert failure for machine
-  ...core_clusters.dcache.downstream_destinations.downstream_destinations
+CHI-cache-ports.sm:117: assert((bitMask.count() <= data_channel_size) &&
+                               (bitMask.count() > 0))
+  machine: board.cache_hierarchy.core_clusters.dcache
+           .downstream_destinations.downstream_destinations   (the L3)
 ```
 
-which is `assert((bitMask.count() <= data_channel_size) && (bitMask.count() > 0))`
-on the L3's data-in port -- a data message with a zero-length bitmask.
+Every existing consumer of that hierarchy (`config/bench/x86-parsec.py`,
+`x86-gabs.py`, `riscv-gabs.py`, `config/run/x86-ubuntu-run.py`) is FS mode, so
+the SE path appears never to have been exercised. Ruled out along the way:
+not the Pin traces (a gem5-captured trace fails identically), not request size
+(`data_channel_size` is 64, max access 32 B, none zero-length), not
+page-straddling from the converter's remapping (zero such accesses), not
+`requires_send_evicts` (fails either way).
 
-What has been ruled out:
+`gem5`'s own `PrivateL1CacheHierarchy` (CHI) runs the same SE workload on 2
+cores without complaint, so CHI-in-SE is fine in general.
 
-* **Not the Pin traces.** It reproduces identically with a gem5-captured
-  trace (`m5out/capture`), so it is the hierarchy setup, not the trace.
-* **Not request size.** `data_channel_size` is 64 everywhere in `config/chi`;
-  the traces' largest access is 32 B, and none is zero-length.
-* **Not page-straddling from the converter's remapping.** Zero accesses in the
-  trace cross a 4 KiB boundary (one crosses a cache line, which TraceCPU
-  splits normally).
-* **Not `requires_send_evicts`.** Fails the same with it true and false.
+### Finding 2: TraceCPU + CHI hits a chain of protocol asserts
 
-Next things to try: whether `RubySequencer`/`num_of_sequencers` accounting is
-right when the "cores" are not real CPUs; whether the L3 slice address ranges
-cover `TraceBoard.mem_ranges`; and running the same hierarchy with a
-`TimingSimpleCPU` through this board to separate the shim from `TraceCPU`.
+With `--hierarchy gem5-chi` (the working one) and TraceCPUs instead of a real
+CPU:
+
+1. `CHI-cache-actions.sm:1616` -- `assert(use_DMT == false || reqType is
+   Atomic)` at `Send_ReadNoSnp`. The stdlib home node sets
+   `enable_DMT = True`; `--no-dmt` (default) turns it off.
+2. Then `CHI-cache-actions.sm:2463` -- a `CompData_UC`/`DataSepResp_UC`
+   arriving while the TBE already holds valid+dirty data.
+
+A `TimingSimpleCPU` on the identical hierarchy does not hit either, so this is
+specific to TraceCPU's request stream. `TraceCPU` is normally paired with
+classic caches (upstream `configs/example/etrace_replay.py` builds a classic
+hierarchy), so TraceCPU + Ruby/CHI looks like an unexercised combination.
+
+Next steps: run TraceCPU against another Ruby protocol (MOESI_CMP_directory is
+also built into X86_CHI) to tell "TraceCPU + Ruby" from "TraceCPU + CHI"; and
+compare the request flags TraceCPU sets against those a TimingSimpleCPU sets
+for the same access.
+
+Until this is resolved, **`replay.py` with classic caches is the working
+path**, and it is the one all the validated numbers in this file come from.

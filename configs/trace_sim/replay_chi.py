@@ -42,6 +42,15 @@ def parse_args():
     p.add_argument("--l2-size", default="256kB")
     p.add_argument("--l3-size", default="1MB")
     p.add_argument("--cores-per-cluster", type=int, default=1)
+    p.add_argument("--hierarchy", choices=("gem5-chi", "repo-l3"),
+                   default="gem5-chi",
+                   help="gem5-chi = gem5's stdlib CHI PrivateL1CacheHierarchy "
+                        "(works in SE mode). repo-l3 = config/chi/"
+                        "l3_cache_hierarchy.py, which currently asserts in SE "
+                        "mode -- see the README; it is only exercised in FS.")
+    p.add_argument("--no-dmt", action="store_true", default=True,
+                   help="disable Direct Memory Transfer on the home node "
+                        "(required for TraceCPU; see README)")
     p.add_argument("--send-evicts", action="store_true",
                    help="have Ruby notify the core of evictions")
     return p.parse_args()
@@ -224,28 +233,44 @@ def main():
         for cpu in cpus:
             cpu.arbiter = board.arbiter
 
-    l1_config, l2_config, l3_config = chi_cache_configs()
-    l1_config["size"] = args.l1_size
-    l2_config["size"] = args.l2_size
-    l3_config["size"] = args.l3_size
+    if args.hierarchy == "gem5-chi":
+        from gem5.components.cachehierarchies.chi.private_l1_cache_hierarchy \
+            import PrivateL1CacheHierarchy
+        hierarchy = PrivateL1CacheHierarchy(size=args.l1_size, assoc=8)
+    else:
+        l1_config, l2_config, l3_config = chi_cache_configs()
+        l1_config["size"] = args.l1_size
+        l2_config["size"] = args.l2_size
+        l3_config["size"] = args.l3_size
+        from config.chi.l3_cache_hierarchy import L3CacheHierarchy
+        hierarchy = L3CacheHierarchy(
+            l1_config=l1_config,
+            l2_config=l2_config,
+            l3_config=l3_config,
+            cores_per_cluster=args.cores_per_cluster,
+        )
 
-    from config.chi.l3_cache_hierarchy import L3CacheHierarchy
-
-    hierarchy = L3CacheHierarchy(
-        l1_config=l1_config,
-        l2_config=l2_config,
-        l3_config=l3_config,
-        cores_per_cluster=args.cores_per_cluster,
-    )
     board.cache_hierarchy = hierarchy
     hierarchy.incorporate_cache(board)
+
+    if args.no_dmt:
+        # The stdlib CHI home node enables Direct Memory Transfer, but
+        # CHI-cache-actions.sm:1616 asserts use_DMT is false for any
+        # non-atomic request reaching Send_ReadNoSnp. TraceCPU's request mix
+        # hits that path; a TimingSimpleCPU on the same hierarchy does not.
+        directory = getattr(hierarchy, "directory", None)
+        dirs = directory if isinstance(directory, list) else [directory]
+        for d in dirs:
+            if d is not None and hasattr(d, "enable_DMT"):
+                d.enable_DMT = False
+        print("[trace_sim] DMT disabled on the home node(s)")
 
     root = Root(full_system=False, system=board)
     root.system.mem_mode = "timing"
     m5.instantiate()
 
     print(f"[trace_sim] CHI replay: {args.num_cores} TraceCPU(s) "
-          f"L1={args.l1_size} L2={args.l2_size} L3={args.l3_size} "
+          f"hierarchy={args.hierarchy} L1={args.l1_size} "
           f"sync={'on' if args.sync else 'OFF'}")
     exit_event = m5.simulate()
     print(f"[trace_sim] done @ tick {m5.curTick()}: {exit_event.getCause()}")
