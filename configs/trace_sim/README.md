@@ -412,8 +412,7 @@ queue.
 ### Still missing from the paper
 
 * **Trace replication N -> M** for weak-scaling studies (paper section III-A4b).
-* The Pin path (`pintools/etrace`) records no sync events, so it cannot feed
-  the arbiter yet -- it would need to hook the same workbegin/workend markers.
+* (done -- see "Sync markers in the Pin path" below.)
 
 
 ## Filtering: capture unfiltered, let gem5 model the L1
@@ -457,3 +456,67 @@ system.gen*.numSuppressed                0
 
 **Rule:** `--l1d` only with `-nofilter 1`. Default `l1filter` traces go
 straight into the hierarchy below the L1.
+
+
+## Sync markers in the Pin path
+
+The Pin route now feeds the arbiter, so the whole ElasticSimMATE loop can run
+from a hardware capture.
+
+**Markers cannot be gem5 m5 ops.** `m5_work_begin` emits opcode `0F 04`, which
+is an *illegal instruction* on real x86 -- a gem5-marked binary SIGILLs the
+moment Pin runs it natively. The Pin path instead marks regions with ordinary
+no-op functions hooked by name:
+
+```c
+void __attribute__((noinline)) __trace_sync_begin(unsigned long type) {}
+void __attribute__((noinline)) __trace_sync_end(unsigned long type) {}
+```
+
+`etrace` hooks them with `RTN_FindByName` and reads `type` via
+`IARG_FUNCARG_ENTRYPOINT_VALUE` (0 parallel, 1 critical, 2 barrier). Override
+the symbol names with `-sync_begin` / `-sync_end`.
+
+**Units matter.** The marker records the tool's running *record count*, not an
+instruction count, because that is what `TraceCPU` counts in at replay -- so
+the arbiter compares like with like.
+
+### Two deadlocks this exposed, both now fixed
+
+1. **A CPU with an empty sync trace used to register anyway.** `syncEnabled`
+   was false, so it never reached a barrier and never retired, and the arbiter
+   counted it as active forever. This is the *normal* case for a main thread
+   that only spawns and joins. `initSyncTrace()` now warns and does not
+   register.
+2. **`replay.py` passed `num_cpus=args.num_cores`.** With one CPU legitimately
+   not registering, the barrier waited forever for an arrival that could never
+   come. The arbiter now infers its participant count from who registers
+   (`num_cpus=0`).
+
+### Verified
+
+`pin_sync_demo`, 2 worker threads + main, 18 markers per worker:
+
+```
+cpu0: sync trace contains no events; replays unsynchronised, not counted
+cpu1: loaded 18 synchronisation points (arbiter id 0)
+cpu2: loaded 18 synchronisation points (arbiter id 1)
+
+24051500: SyncArbiter: cpu 0 arrived (1/2)
+24052000: SyncArbiter: cpu 1 arrived (2/2)
+24052000: SyncArbiter: releasing barrier 1
+24052000: SyncArbiter: cpu 1 entered critical
+```
+
+2 barriers released, 1 critical grant, 3 stalls, 2 clean retires, no deadlock.
+
+## Persistent locations
+
+The protobuf tooling and traces live outside the session scratchpad, which is
+wiped between sessions:
+
+* `~/fedora/pintools/pbenv/venv` -- protobuf runtime (cannot be installed
+  system-wide: pacman would pull libprotobuf 34 and break the gem5 build)
+* `~/fedora/pintools/pbenv/pb2` -- generated `*_pb2.py`
+* `~/fedora/pintools/workloads` -- marker-annotated demo workloads
+* `~/fedora/pintools/traces` -- captured and converted traces

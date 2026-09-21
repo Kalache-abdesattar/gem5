@@ -86,7 +86,11 @@ def main():
     system.membus = SystemXBar()
 
     if args.sync:
-        system.arbiter = SyncArbiter(num_cpus=args.num_cores)
+        # num_cpus=0 means "infer from whoever registers". Passing
+        # args.num_cores would be wrong: a CPU whose sync trace is empty
+        # (a main thread that only spawns and joins) deliberately does
+        # not register, and the barrier would wait forever for it.
+        system.arbiter = SyncArbiter(num_cpus=0)
 
     system.cpu = [
         TraceCPU(

@@ -76,6 +76,7 @@ def main():
     sys.path.insert(0, args.pb2_dir)
     import packet_pb2
     import inst_dep_record_pb2 as dep_pb2
+    import sync_event_pb2
 
     os.makedirs(args.outdir, exist_ok=True)
 
@@ -105,7 +106,8 @@ def main():
         obj = f"etrace.cpu{cpu}"
         ipath = os.path.join(args.outdir, f"cpu{cpu}.inst.trace.gz")
         dpath = os.path.join(args.outdir, f"cpu{cpu}.data.trace.gz")
-        istream, dstream = Stream(ipath), Stream(dpath)
+        spath = os.path.join(args.outdir, f"cpu{cpu}.sync.trace.gz")
+        istream, dstream, sstream = Stream(ipath), Stream(dpath), Stream(spath)
 
         ih = packet_pb2.PacketHeader()
         ih.obj_id, ih.tick_freq = obj, args.tick_freq
@@ -115,13 +117,35 @@ def main():
         dh.obj_id, dh.tick_freq, dh.window_size = obj, args.tick_freq, args.window
         dstream.write(dh)
 
-        n = 0
+        sh = sync_event_pb2.SyncEventHeader()
+        sh.obj_id, sh.tick_freq = obj, args.tick_freq
+        sstream.write(sh)
+
+        n = nsync = 0
         last_fetch_line = None
         tick = 0
         with open(path) as src:
             for line in src:
                 p = line.split()
-                if not p or p[0] != "S":
+                if not p:
+                    continue
+                if p[0] == "Y":
+                    # Sync marker: "Y <type> <isEnd> <record-count>".
+                    # num_insts is the record count, which is the unit
+                    # TraceCPU counts in, so the arbiter compares like with
+                    # like.
+                    ev = sync_event_pb2.SyncEvent()
+                    ev.type = int(p[1])
+                    ev.is_end = int(p[2])
+                    ev.num_insts = int(p[3])
+                    ev.num_deps = 0
+                    ev.tick = 0
+                    ev.pc = 0
+                    ev.tid = cpu
+                    sstream.write(ev)
+                    nsync += 1
+                    continue
+                if p[0] != "S":
                     continue
                 seq = int(p[1]); pc = int(p[2]); typ = int(p[3])
                 ea = int(p[4]); size = int(p[5])
@@ -166,9 +190,8 @@ def main():
                 if args.max_records and n >= args.max_records:
                     break
 
-        istream.close(); dstream.close()
-        print(f"[conv] cpu{cpu}: {n} records -> {os.path.basename(dpath)}, "
-              f"{os.path.basename(ipath)}")
+        istream.close(); dstream.close(); sstream.close()
+        print(f"[conv] cpu{cpu}: {n} records, {nsync} sync events")
 
     top = args.phys_base + (len(frames) << pgshift)
     print(f"[conv] remapped {len(frames)} pages -> footprint {top/2**20:.1f} MiB")

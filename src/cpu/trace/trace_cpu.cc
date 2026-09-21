@@ -1477,7 +1477,16 @@ TraceCPU::initSyncTrace(const std::string &filename)
         syncPoints.push_back(sp);
     }
 
-    syncEnabled = !syncPoints.empty();
+    if (syncPoints.empty()) {
+        // Do NOT register: a participant that never reaches a barrier and
+        // never retires would hold every other CPU forever. This is the normal
+        // case for a main thread that only spawns and joins.
+        warn("%s: sync trace %s contains no events; this CPU replays "
+             "unsynchronised and is not counted at barriers.",
+             name(), filename);
+        return;
+    }
+    syncEnabled = true;
     arbiterId = arbiter->registerCpu(this);
     inform("%s: loaded %llu synchronisation points from %s (arbiter id %u)",
            name(), (unsigned long long)syncPoints.size(), filename, arbiterId);
