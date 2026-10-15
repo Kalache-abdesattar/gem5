@@ -703,3 +703,68 @@ the L2 absorbs four cores comfortably, when in fact it thrashes -- the error
 inverts the conclusion rather than merely blurring it.
 
 Use `--no-offset` only to reproduce the paper; never to answer a question.
+
+
+## Real PARSEC, unmodified
+
+`etrace -autosync 1` derives the synchronisation trace from the **pthread calls
+themselves**, so an unmodified benchmark binary yields everything the arbiter
+needs. No source changes, no extra m5 ops, no PARSEC hooks beyond the ROI
+markers it already has.
+
+| hooked symbol | mapped to |
+|---|---|
+| `pthread_mutex_lock` | critical begin |
+| `pthread_mutex_trylock` | critical begin, **only when it returns 0** |
+| `pthread_mutex_unlock` | critical end |
+| `pthread_barrier_wait` | barrier, bracketed `IPOINT_BEFORE` and `IPOINT_AFTER` |
+
+That is the faithful mapping: a mutex region *is* a critical section, a barrier
+wait *is* a barrier.
+
+### trylock has to be hooked on its return value
+
+Hooking `pthread_mutex_trylock` at `IPOINT_BEFORE` like `pthread_mutex_lock`
+records acquisitions that never happened, because trylock acquires only when it
+returns 0. It shows up immediately as more ends than beginnings. On
+streamcluster (which the sharing study found to be trylock-dominated: 780k
+trylock against 91k lock):
+
+```
+before: 45,744 critical begin   68,560 critical end
+after:  57,143 critical begin   68,542 critical end
+```
+
+### Known residual imbalance
+
+~11k more ends than beginnings remain. Two causes, both inherent:
+
+* `pthread_cond_wait` releases and reacquires its mutex internally, without
+  going through the exported `pthread_mutex_lock`/`unlock` symbols Pin hooks.
+* ROI gating clips regions: a lock taken before `__parsec_roi_begin` and
+  released inside emits only its end.
+
+The arbiter tolerates this -- `releaseLock()` checks ownership and ignores a
+release from a CPU that does not hold the lock -- so the trace replays, but the
+critical-section model is approximate. Treat lock *counts* from this path as a
+lower bound.
+
+### Verified
+
+streamcluster, simsmall, `-n 2`, ROI-gated, 2M instructions per thread:
+
+```
+cpu0: 2,000,027 records,      8 sync events
+cpu1: 2,000,008 records, 59,652 sync events
+cpu2: 2,000,018 records, 66,003 sync events
+cpu3:    11,420 records,     11 sync events
+cpu4:    11,305 records,     11 sync events
+footprint after remap: 2.1 MiB
+
+5-core replay: done @ tick 807,907,500
+```
+
+Note the thread structure matches what the syncgraph tool measured
+independently: two heavy workers plus a main thread and two light helpers, and
+no barriers in the ROI window -- streamcluster synchronises through
+trylock/mutex, not `pthread_barrier_wait`.
