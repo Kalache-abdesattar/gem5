@@ -73,6 +73,18 @@ bool
 SyncArbiter::acquire(unsigned id)
 {
     assert(id < participants.size());
+    if (lockHolder == (int)id) {
+        // Already the holder. A trace derived from pthread calls can show a
+        // second acquire without an intervening release, because
+        // pthread_cond_wait releases and reacquires its mutex internally,
+        // below the exported symbols Pin hooks. Queueing here would park the
+        // CPU behind itself and deadlock. Grant it, and let the next release
+        // free the lock -- no nesting depth, because an approximate trace can
+        // also lose the matching release and would then leave it held
+        // forever.
+        DPRINTF(TraceCPUData, "SyncArbiter: cpu %u re-entered critical\n", id);
+        return true;
+    }
     if (lockHolder < 0) {
         lockHolder = (int)id;
         ++criticalGrants;

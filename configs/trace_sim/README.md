@@ -744,10 +744,31 @@ after:  57,143 critical begin   68,542 critical end
 * ROI gating clips regions: a lock taken before `__parsec_roi_begin` and
   released inside emits only its end.
 
-The arbiter tolerates this -- `releaseLock()` checks ownership and ignores a
-release from a CPU that does not hold the lock -- so the trace replays, but the
-critical-section model is approximate. Treat lock *counts* from this path as a
-lower bound.
+The arbiter tolerates this, but only after a fix that real PARSEC forced.
+
+`releaseLock()` already ignored a release from a CPU that does not hold the
+lock. The missing case was the other direction: a **second acquire by the
+current holder**, which the lost releases guarantee will happen. The arbiter
+queued it -- parking the CPU behind itself, which deadlocks. The 5-core
+streamcluster `--sync` replay hung for the full 30-minute cap on exactly this.
+
+`acquire()` now grants immediately when the caller already holds the lock, and
+deliberately keeps **no nesting depth**: an approximate trace can lose the
+matching release too, and depth counting would then leave the lock held
+forever. The next release frees it.
+
+It is not a rare path. In a 300k-instruction window of streamcluster:
+
+```
+critical entered  : 12
+critical re-enter :  6     <- each one was a deadlock before the fix
+critical queued   :  3
+critical handed   :  3
+retires           :  5
+```
+
+The critical-section model remains approximate; treat lock *counts* from this
+path as a lower bound.
 
 ### Verified
 
@@ -762,6 +783,14 @@ cpu4:    11,305 records,     11 sync events
 footprint after remap: 2.1 MiB
 
 5-core replay: done @ tick 807,907,500
+```
+
+And with the arbiter enabled, on a 300k-instruction capture of the same
+benchmark:
+
+```
+5-core PARSEC nosync : done @ tick 120,677,000
+5-core PARSEC sync   : done @ tick 121,543,500
 ```
 
 Note the thread structure matches what the syncgraph tool measured
