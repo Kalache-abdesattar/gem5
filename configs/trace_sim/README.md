@@ -29,7 +29,7 @@ an arbiter that stalls TraceCPUs at the recorded sync points.
 | 2. Per-core traces, N-core replay | **working** | one trace pair per core; N TraceCPUs sharing a cache hierarchy. Still *no* sync — the known-wrong baseline that motivates step 3 |
 | 3. Synchronisation trace | **working** | record sync events (barrier / critical / parallel-region) with instruction + dependency counts per region |
 | 4. Arbiter | **working** | a SimObject that locks/unlocks TraceCPUs at region boundaries, per Fig. 4b of the paper |
-| 5. Replication | planned | replay an N-core trace onto M > N cores for weak-scaling studies |
+| 5. Replication | **working** | replay an N-core trace onto M > N cores for weak-scaling studies |
 | 6. CHI / Ruby back end | planned | swap the classic hierarchy for the CHI setup this repo already uses |
 
 ## Prerequisite: protobuf
@@ -657,3 +657,49 @@ on real hardware at ~100 MIPS.
 **Do not use it for timing or IPC.** simTicks is 25-37% off and cannot be
 calibrated. Any performance claim must come from the gem5-captured path -- and
 even there, validate per workload rather than trusting the `hello` number.
+
+
+## Step 5: trace replication N -> M
+
+`replicate_traces.py` builds M core traces from N captured ones: core *i*
+replays source *(i mod N)* with its **data** addresses shifted by
+*(i // N) x stride*. The stride defaults to the observed data footprint rounded
+up to a power of two.
+
+Only data addresses move. The program counter is left alone, because replicas
+are threads of one program: they share code, and shifting the PC would invent
+instruction footprint that does not exist.
+
+```
+python configs/trace_sim/replicate_traces.py <src> <out> --cores 8 --pb2-dir <d>
+gem5.opt configs/trace_sim/replay.py --trace-dir <out> --num-cores 8
+```
+
+### Why the offset is not optional
+
+The paper replicates **without** address offsetting and says so plainly: all
+cores issue requests to the same addresses, "which results in unrealistic data
+sharing during replay", and it measures "well above 80% data sharing in most
+experiments". `--no-offset` reproduces that for comparison.
+
+One source trace (512 KiB working set) replicated to 4 cores over a 1 MiB
+shared L2:
+
+| | simTicks | L2 acc | L2 miss | miss-rate |
+|---|---|---|---|---|
+| 1 core (baseline) | 957,333,000 | 336,834 | 9,789 | 2.906% |
+| 4 cores, offset | 10,485,350,500 | 1,347,336 | 850,239 | **63.105%** |
+| 4 cores, `--no-offset` | 2,252,009,000 | 736,233 | 13,847 | **1.881%** |
+
+With offsets, L2 accesses scale 4x as they should (1,347,336 ~ 4 x 336,834) and
+the miss-rate explodes to 63%: four disjoint 512 KiB working sets are 2 MiB of
+live data against a 1 MiB L2, so it thrashes. That is the real weak-scaling
+answer.
+
+Without offsets the four cores collide on the same lines, so the L2 serves them
+all from one copy: accesses rise only 2.2x and the **miss-rate falls to 1.881%,
+below the single-core baseline**. A scaling study run that way would conclude
+the L2 absorbs four cores comfortably, when in fact it thrashes -- the error
+inverts the conclusion rather than merely blurring it.
+
+Use `--no-offset` only to reproduce the paper; never to answer a question.
