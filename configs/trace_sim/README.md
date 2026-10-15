@@ -591,3 +591,69 @@ A stock stdlib `SimpleBoard` + `SimpleProcessor` running `hello` on it panics
 at `CHI-cache-ports.sm:117` (`assert(bitMask.count() > 0)`). Every existing
 consumer of that hierarchy is FS mode, so the SE path looks unexercised. Select
 it with `--hierarchy repo-l3` if you want to work on it.
+
+
+## Validating the Pin path (and a correction to the headline accuracy)
+
+`st_kernel` (single-threaded, 512 KiB working set, deterministic) captured three
+ways over the **same 3,000,000 instructions** and replayed through an identical
+classic hierarchy:
+
+| | simTicks | L2 acc | L2 miss | L2 miss-rate |
+|---|---|---|---|---|
+| O3 reference | 1,519,818,500 | 342,857 | 9,714 | 2.833% |
+| gem5-trace replay | 1,873,949,000 | 342,827 | 9,703 | 2.830% |
+| Pin-trace replay | 957,333,000 | 336,834 | 9,789 | 2.906% |
+
+vs the reference:
+
+| | L2 acc | L2 miss | miss-rate | simTicks |
+|---|---|---|---|---|
+| gem5-trace | -0.01% | -0.11% | **-0.10%** | **+23.3%** |
+| Pin-trace | -1.76% | +0.77% | **+2.57%** | **-37.0%** |
+
+`etrace` gained `-maxinsts` for this: `-max` bounds *records*, and a memory
+instruction emits one record per operand, so bounding by records compared
+different amounts of program (2.23 M instructions against 3.0 M). The
+instruction-matched numbers above are within 0.01% of the record-matched ones,
+so the confound was not the cause -- but the knob is needed for any honest
+comparison.
+
+### Correction: the "+0.1%" figure does not generalise
+
+The +0.1% simTicks accuracy reported earlier in this file was measured on
+`hello` -- a few thousand instructions, dominated by startup. On a memory-bound
+kernel the **gem5-captured** elastic trace replays **+23.3%** off the O3
+reference. Elastic Traces' accuracy is workload-dependent; quote it per
+workload, not as a property of the method.
+
+### comp_delay does not calibrate, and does not need to
+
+Sweeping the synthetic delay on the Pin trace:
+
+| comp_delay | simTicks | vs reference | L2 miss-rate |
+|---|---|---|---|
+| 500 | 957,333,000 | -37.0% | 2.906% |
+| 900 | 1,002,595,000 | -34.0% | 2.906% |
+| 1300 | 1,130,467,000 | -25.6% | 2.906% |
+| 1700 | 1,097,919,500 | -27.8% | 2.906% |
+
+Two things to take from this:
+
+* **Timing cannot be dialled in.** The response is non-monotonic (1700 is worse
+  than 1300): on a memory-bound workload the critical path is memory latency
+  and the dependency graph, not the compute delay. There is no comp_delay that
+  recovers the reference.
+* **Memory behaviour is invariant to it.** The L2 miss-rate is identical to
+  three decimal places across the whole sweep.
+
+### So: what the Pin path is for
+
+**Use it for memory-system studies.** Cache behaviour reproduces within ~2.6%
+on miss-rate and is independent of the fabricated timing, so footprint,
+miss-rate, and interconnect-load questions are answerable from a trace captured
+on real hardware at ~100 MIPS.
+
+**Do not use it for timing or IPC.** simTicks is 25-37% off and cannot be
+calibrated. Any performance claim must come from the gem5-captured path -- and
+even there, validate per workload rather than trusting the `hello` number.
