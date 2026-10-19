@@ -68,3 +68,17 @@ class ElasticTrace(ProbeListenerObject):
     traceVirtAddr = Param.Bool(
         False, "Set to true if virtual addresses are to be traced."
     )
+    # Upper bound on the computation delay recorded per node
+    compDelayCap = Param.Tick(
+        0,
+        "Clamp the computation delay of every node to at most this many "
+        "ticks. The computation delay is measured in the traced CPU as the "
+        "gap between a producer completing and its consumer executing, so it "
+        "absorbs any time the consumer spent waiting on memory-system "
+        "back-pressure (a full load queue, no free MSHRs, a stalled "
+        "in-order commit) rather than computing. Replaying that as a fixed "
+        "pre-issue delay charges the same congestion twice, because the "
+        "replay's own memory model regenerates it. Setting this to the "
+        "longest functional unit latency keeps genuine compute and drops "
+        "the borrowed memory latency. Default zero disables the clamp.",
+    )

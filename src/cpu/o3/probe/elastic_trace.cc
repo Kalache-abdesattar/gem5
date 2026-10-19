@@ -65,6 +65,7 @@ ElasticTrace::ElasticTrace(const ElasticTraceParams &params)
        startTraceInst(params.startTraceInst),
        allProbesReg(false),
        traceVirtAddr(params.traceVirtAddr),
+       compDelayCap(params.compDelayCap),
        stats(this)
 {
     cpu = dynamic_cast<CPU *>(params.manager);
@@ -141,6 +142,9 @@ ElasticTrace::regEtraceListeners()
         this, "Execute", &ElasticTrace::recordExecTick);
     connectListener<ProbeListenerArg<ElasticTrace, DynInstPtr>>(
         this, "ToCommit", &ElasticTrace::recordToCommTick);
+    connectListener<ProbeListenerArg<ElasticTrace,
+        std::pair<DynInstPtr, PacketPtr>>>(
+        this, "DataAccessComplete", &ElasticTrace::recordDataReturn);
     connectListener<ProbeListenerArg<ElasticTrace, DynInstPtr>>(
         this, "Rename", &ElasticTrace::updateRegDep);
     connectListener<ProbeListenerArg<ElasticTrace, SeqNumRegPair>>(
@@ -232,6 +236,25 @@ ElasticTrace::recordToCommTick(const DynInstPtr& dyn_inst)
     InstExecInfo* exec_info_ptr = itr_exec_info->second;
     exec_info_ptr->toCommitTick = curTick();
 
+}
+
+void
+ElasticTrace::recordDataReturn(const std::pair<DynInstPtr, PacketPtr>& pair)
+{
+    const DynInstPtr& dyn_inst = pair.first;
+    // Only loads make a consumer wait on returning data; a store's consumers
+    // are ordered by commit, which compDelayRob already handles.
+    if (!dyn_inst->isLoad())
+        return;
+    auto itr_exec_info = tempStore.find(dyn_inst->seqNum);
+    if (itr_exec_info == tempStore.end())
+        return;
+    // Keep the first response: a split access completes in parts, and the
+    // consumer unblocks on the last one, but recording the earliest keeps
+    // this conservative (never later than the real unblock).
+    InstExecInfo* exec_info_ptr = itr_exec_info->second;
+    if (exec_info_ptr->dataReturnTick == MaxTick)
+        exec_info_ptr->dataReturnTick = curTick();
 }
 
 void
@@ -426,6 +449,7 @@ ElasticTrace::addDepTraceRecord(const DynInstPtr& head_inst,
     new_record->executeTick = exec_info_ptr->executeTick;
     new_record->toCommitTick = exec_info_ptr->toCommitTick;
     new_record->commitTick = curTick();
+    new_record->dataReturnTick = exec_info_ptr->dataReturnTick;
 
     // Assign initial values for number of dependents and computational delay
     new_record->numDepts = 0;
@@ -702,7 +726,31 @@ ElasticTrace::compDelayRob(TraceInfo* past_record, TraceInfo* new_record)
         if (new_record->isStore()) {
             completion_tick = past_record->toCommitTick;
         } else {
-            completion_tick = past_record->executeTick;
+            // A consumer of a load becomes runnable when the load's DATA
+            // returns, not when the load issued. Using executeTick (issue)
+            // folds the memory latency into comp_delay, and TraceCPU then
+            // pays it a second time because it releases a load's dependents
+            // on the data response.
+            //
+            // Measured effect on the synthetic kernels: none. This edge --
+            // a non-store consumer taking an *order* dependency on a load --
+            // is rare, 623 of them in a 10.5M-record stride trace, and
+            // compDelay is the min over a node's edges, so a register edge
+            // almost always supplies a smaller value anyway. The real
+            // double-count lives elsewhere; see compDelayCap. Kept because
+            // the completion time it uses is the correct one, not because it
+            // changes any number measured so far.
+            //
+            // Fall back to executeTick when the probe did not observe a
+            // return (never-issued or squashed-then-replayed accesses), and
+            // guard against a recorded tick later than the consumer's
+            // execution, which the assert below would reject.
+            if (past_record->dataReturnTick != MaxTick &&
+                past_record->dataReturnTick <= execution_tick) {
+                completion_tick = past_record->dataReturnTick;
+            } else {
+                completion_tick = past_record->executeTick;
+            }
         }
     } else if (past_record->isStore()) {
         completion_tick = past_record->commitTick;
@@ -819,6 +867,24 @@ ElasticTrace::writeDepTrace(uint32_t num_to_write)
             } else {
                  DPRINTFR(ElasticTrace, "\tis a %s\n", temp_ptr->typeToStr());
             }
+            // Clamp away delay that cannot be computation. The value measured
+            // above is the gap between a producer completing and this node
+            // executing, so it also contains whatever time the node spent
+            // waiting on memory-system back-pressure in the traced CPU. The
+            // replay pays that delay before issuing and then its own memory
+            // model regenerates the congestion, charging it twice. Clamping
+            // to the longest functional unit latency keeps real compute.
+            if (compDelayCap && temp_ptr->compDelay > (int64_t)compDelayCap) {
+                ++stats.numCompDelayClamped;
+                stats.compDelayTicksClamped +=
+                    temp_ptr->compDelay - (int64_t)compDelayCap;
+                temp_ptr->compDelay = (int64_t)compDelayCap;
+            }
+            // The fallback below is deliberately NOT clamped: for a
+            // dependency-free node in the first window it assigns an absolute
+            // tick rather than a delay, and TraceCPU::init() reads the first
+            // such value to establish the replay's time offset. Clamping it
+            // would corrupt the start of the timeline.
             if (firstWin && temp_ptr->compDelay == -1) {
                 if (temp_ptr->isLoad()) {
                     temp_ptr->compDelay = temp_ptr->executeTick;
@@ -913,7 +979,12 @@ ElasticTrace::ElasticTraceStats::ElasticTraceStats(statistics::Group *parent)
       ADD_STAT(maxTempStoreSize, statistics::units::Count::get(),
                "Maximum size of the temporary store during the run"),
       ADD_STAT(maxPhysRegDepMapSize, statistics::units::Count::get(),
-               "Maximum size of register dependency map")
+               "Maximum size of register dependency map"),
+      ADD_STAT(numCompDelayClamped, statistics::units::Count::get(),
+               "Number of nodes whose computation delay was clamped to "
+               "compDelayCap"),
+      ADD_STAT(compDelayTicksClamped, statistics::units::Tick::get(),
+               "Total ticks of computation delay removed by compDelayCap")
 {
 }
 

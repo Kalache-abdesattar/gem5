@@ -54,6 +54,7 @@
 #include "cpu/o3/dyn_inst_ptr.hh"
 #include "cpu/sync_event.hh"
 #include "cpu/reg_class.hh"
+#include "mem/packet.hh"
 #include "mem/request.hh"
 #include "params/ElasticTrace.hh"
 #include "proto/inst_dep_record.pb.h"
@@ -156,6 +157,13 @@ class ElasticTrace : public ProbeListenerObject
     void recordToCommTick(const DynInstPtr& dyn_inst);
 
     /**
+     * Record the tick at which a load's data came back.
+     *
+     * @param pair dynamic instruction and the response packet
+     */
+    void recordDataReturn(const std::pair<DynInstPtr, PacketPtr>& pair);
+
+    /**
      * Record a Read After Write physical register dependency if there has
      * been a write to the source register and update the physical register
      * map. For this look up the physRegDepMap with this instruction as the
@@ -219,6 +227,12 @@ class ElasticTrace : public ProbeListenerObject
          */
         Tick toCommitTick;
         /**
+         * Timestamp when a load's data came back from the memory system,
+         * taken from the "DataAccessComplete" probe. MaxTick if the probe
+         * never fired for this instruction (stores, non-memory ops).
+         */
+        Tick dataReturnTick;
+        /**
          * Set of instruction sequence numbers that this instruction depends on
          * due to Read After Write data dependency based on physical register.
          */
@@ -228,7 +242,8 @@ class ElasticTrace : public ProbeListenerObject
         /** Constructor */
         InstExecInfo()
           : executeTick(MaxTick),
-            toCommitTick(MaxTick)
+            toCommitTick(MaxTick),
+            dataReturnTick(MaxTick)
         { }
     };
 
@@ -280,6 +295,16 @@ class ElasticTrace : public ProbeListenerObject
         Tick toCommitTick;
         /* Tick when instruction was committed. */
         Tick commitTick;
+        /**
+         * Tick when a load's data actually returned, from the
+         * "DataAccessComplete" probe. This is the moment a consumer of the
+         * load can execute, and it lies strictly between executeTick (issue)
+         * and toCommitTick. Without it, comp_delay for a load's consumers
+         * absorbs the whole memory latency, which TraceCPU then pays again
+         * because it releases dependents on the data response. 0 means "not
+         * observed", and callers must fall back to the old behaviour.
+         */
+        Tick dataReturnTick;
         /* If instruction was committed, as against squashed. */
         bool commit;
         /* List of order dependencies. */
@@ -386,6 +411,12 @@ class ElasticTrace : public ProbeListenerObject
 
     /** Whether to trace virtual addresses for memory requests. */
     const bool traceVirtAddr;
+
+    /**
+     * Upper bound applied to the computation delay of every node, or zero to
+     * leave the recorded value untouched. See the compDelayCap parameter.
+     */
+    const Tick compDelayCap;
 
     /** Pointer to the O3CPU that is this listener's parent a.k.a. manager */
     CPU *cpu;
@@ -575,6 +606,10 @@ class ElasticTrace : public ProbeListenerObject
          * register.
          */
         statistics::Scalar maxPhysRegDepMapSize;
+        /** No. of nodes whose computation delay hit compDelayCap */
+        statistics::Scalar numCompDelayClamped;
+        /** Total ticks of computation delay removed by compDelayCap */
+        statistics::Scalar compDelayTicksClamped;
     } stats;
 
 };
