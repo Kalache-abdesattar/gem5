@@ -797,3 +797,804 @@ Note the thread structure matches what the syncgraph tool measured
 independently: two heavy workers plus a main thread and two light helpers, and
 no barriers in the ROI window -- streamcluster synchronises through
 trylock/mutex, not `pthread_barrier_wait`.
+
+
+## Simulation speed (measured, same host)
+
+x264, simsmall, `-n 2`, ROI-gated, 2M instructions per worker thread ->
+**16 threads, 18,027,621 instructions, 18,176,307 records**.
+
+| stage | throughput | wall |
+|---|---|---|
+| Pin capture (`etrace`, before optimisation) | 0.33 M insts/s | - |
+| Pin capture (`etrace`, optimised) | **0.77 M insts/s** | - |
+| Pin capture (`l1filter`, for comparison) | 4.15 M insts/s | - |
+| text -> protobuf conversion | 0.11 M records/s | 173 s |
+| **gem5 replay, 16 cores** | **0.75 M ops/s** | 24.3 host s |
+| gem5 replay, 16 cores, `--sync` | 0.72 M ops/s | 25.3 host s |
+
+Replay results: `done @ tick 1,387,695,000` (nosync) and `1,391,467,000`
+(sync).
+
+### Replay speedup over detailed simulation
+
+Per core, on `st_kernel`:
+
+| | throughput | |
+|---|---|---|
+| gem5 O3 detailed | 0.188 M insts/s | |
+| TraceCPU replay | 1.123 M ops/s | **6.0x faster** |
+
+That matches the Elastic Traces paper's claimed 6-8x.
+
+### The capture is now the bottleneck, not the replay
+
+This is the uncomfortable number. `etrace` captures at 0.77 M insts/s against
+gem5 O3's 0.188 M insts/s -- only **4x** faster. The Pin path's whole premise
+was capturing cheaply on real hardware, and at this rate capturing a trace costs
+a meaningful fraction of just simulating the thing.
+
+The 2.3x already won (0.33 -> 0.77) came from two changes on the hot path:
+
+* `lastWriter` was a `std::map<REG, UINT64>`. REG is a small dense enum, so a
+  flat `std::vector` indexed by register removes a tree lookup per source and
+  per destination operand of every instruction.
+* The record was written with a dozen chained `ostream <<` calls. One
+  `snprintf` into a staging buffer plus one `write` replaces them.
+
+What is still on the table, in rough order of expected win:
+
+* **Binary records instead of text.** Formatting integers to decimal is the
+  remaining hot cost, and the converter re-parses them immediately afterwards.
+* `lastAccess` is still a `std::map<ADDRINT, UINT64>`; a small direct-mapped
+  hash of recently-touched lines would serve, since order dependencies only
+  matter within the dependency window.
+* The per-memory-operand `InstDesc` copy at instrumentation time allocates;
+  it could be flattened into one descriptor with an operand array.
+
+By contrast `l1filter` runs at 4.15 M insts/s doing cache modelling, which
+shows the gap is this tool's bookkeeping rather than Pin itself.
+
+### Determinism
+
+The optimised tool is deterministic: two runs with ASLR disabled
+(`setarch -R`) produce byte-identical traces. Comparing a trace against one
+captured *before* the optimisation shows differences, but they are an ASLR
+artifact, not a regression -- stack addresses land at different offsets within
+a cache line, which changes how accesses group into lines and therefore which
+order dependencies are recorded. Disable ASLR for any run-to-run comparison.
+
+## Why gem5's own dependency graph over-serialises: comp_delay absorbs memory back-pressure
+
+The gem5-trace replay was consistently slower than the O3 reference it was
+captured from, and by wildly different margins per kernel:
+
+| kernel | O3 reference | gem5-trace replay | error |
+|--------|-------------:|------------------:|------:|
+| l1     |  3.390e9 |  3.462e9 |  +2.1% |
+| l2     |  6.854e9 |  6.914e9 |  +0.9% |
+| chase  | 94.246e9 | 98.723e9 |  +4.7% |
+| seq    | 24.571e9 | 26.958e9 |  +9.7% |
+| rand   |148.803e9 |212.762e9 | +43.0% |
+| stride | 23.903e9 | 36.197e9 | +51.4% |
+
+Earlier notes blamed replay queue sizing. That explains part of `seq` and
+`rand` but it provably does not explain `stride`: replaying `stride` with the
+ROB/LQ/SQ raised from 192/32/32 to 512/128/128 moves it from 36.197e9 to
+36.053e9, a 0.4% change against a 51% error. The limiter is not a queue.
+
+### What the trace actually contains
+
+`ElasticTrace` defines a node's `comp_delay` as the gap between a producer
+completing and the consumer executing (`compDelayRob`,
+`compDelayPhysRegDep`), where "executing" means, per `TraceInfo::getExecuteTick`:
+
+* a load -> the tick its request was **sent**,
+* a store -> the tick it **committed** (when O3 sends it from the store buffer),
+* anything else -> the tick it wrote back.
+
+Nothing in that definition restricts the gap to computation. Any time the
+consumer sat in the load queue with its address already computed -- waiting for
+a free MSHR, for the cache to unblock, for in-order commit to drain past a
+missing load at the ROB head -- lands in `comp_delay`.
+
+Dumping the full `stride` trace (10,516,024 records) shows how much:
+
+```
+                 records          sum comp_delay      >=20k ticks
+  LOAD           810,326         168,891,271,994      774,977 recs
+  STORE        1,322,849           5,877,656,000       50,791 recs
+  COMP         8,382,849          25,165,810,488      255,808 recs
+  total                          199,934,738,482      96.5% of all
+                                                      comp_delay is
+                                                      in records >=20k
+```
+
+Mean `comp_delay` per load is **208,423 ticks = 208 ns**, and 93.5% of loads
+fall in the 100k-500k tick band:
+
+```
+  bucket         records   share         sum ticks   share
+  100k-200k      327,167   40.4%    42,774,070,000   25.3%
+  200k-500k      430,312   53.1%   118,141,453,000   70.0%
+```
+
+The longest latency any functional unit in the capture config can have is 24
+cycles (`src/cpu/o3/FuncUnitConfig.py`), which at 2GHz is **12,000 ticks**. No
+x86 instruction computes for 208 ns. Those values are memory latency wearing a
+compute label.
+
+### Why that double-counts
+
+`TraceCPU` already models the memory system. It holds a node until its
+dependencies complete, waits `comp_delay`, *then* issues the request and waits
+for the real response. So congestion the reference run experienced is charged
+twice: once as the baked-in `comp_delay`, once more when the replay's own
+memory system regenerates it. The two do not overlap, because `comp_delay` is a
+hard pre-issue timer rather than something the memory system can absorb.
+
+This also explains the per-kernel spread exactly. Mean load `comp_delay` tracks
+the error monotonically:
+
+| kernel | mean load comp_delay | replay error |
+|--------|---------------------:|-------------:|
+| chase  |  53,635 ticks | +4.7% |
+| seq    |  71,344 ticks | +9.7% |
+| stride | 208,423 ticks | +51.4% |
+
+`chase` is a pointer chase: 61.3% of its loads have `comp_delay` under 1000
+ticks, because each load's address genuinely depends on the previous load's
+data and the dependency edge already carries that latency. There is no
+memory-level parallelism, so there is no back-pressure to misattribute. Its
+large-delay loads belong to the high-parallelism summation phase, which is not
+on the critical path. `stride` is the opposite: high parallelism, a deep load
+queue, and therefore a large recorded wait per load.
+
+This is the same thing as the measured symptom reported earlier -- `stride`
+replay sustains 2.24 misses in flight against the reference's 3.36. The
+`comp_delay` timers space the requests out, so the replay cannot reach the
+reference's overlap no matter how large its queues are.
+
+### The oversizing in capture.py does nothing (measured)
+
+`attach_probes()` raises the capture ROB/LQ/SQ to 512/128/128 with the comment
+that resource stalls "would be baked into the trace as compute delay". The
+intent is right but it does not work, because the back-pressure here is MSHRs
+and memory bandwidth, which no amount of queue capacity removes.
+
+Capturing `stride` at the replay's own sizes (`--cap-rob 192 --cap-lq 32
+--cap-sq 32`) gives a mean load `comp_delay` of **207,227** ticks against
+**208,423** for the oversized capture -- a 0.6% difference. Queue capacity is
+simply not what is being waited on. (An earlier draft of this section claimed
+the oversizing makes the recorded delay *longer*; it does not, and the
+measurement above is why that claim was removed.)
+
+What the oversizing *does* change is the instruction trace, and that matters
+more. See "The instruction trace sets a floor" below.
+
+### Fix: clamp comp_delay to the longest real compute latency
+
+`ElasticTrace` gains a `compDelayCap` parameter (`--comp-delay-cap` on
+`capture.py`), applied in `writeDepTrace()` at the single point where
+`comp_delay` is serialised, so it covers every producing path: `compDelayRob`,
+`compDelayPhysRegDep`, and the `firstWin` fallback that otherwise writes an
+absolute tick count as a delay. Two stats, `numCompDelayClamped` and
+`compDelayTicksClamped`, make the clamping auditable instead of silent.
+Default 0 preserves upstream behaviour.
+
+```
+--comp-delay-cap 12000      # 24 cycles at 2GHz = longest FU latency
+```
+
+Anything above that bound cannot be computation by construction, so clamping it
+keeps genuine compute and returns the memory latency to the component that is
+supposed to model it.
+
+A more surgical fix would instrument the O3 LSQ to record, per instruction, the
+time it spent blocked on memory resources, and subtract exactly that. That
+needs new probe plumbing in the LSQ; the cap gets the same effect from one
+parameter and is self-auditing via the stats.
+
+### Three bugs the clamp exposed
+
+Clamping `comp_delay` does not change the dependency graph: the capped
+`stride` trace has exactly the same 10,516,024 records, the same edges and the
+same addresses. Only the delays shrink, from 199.93e9 ticks of recorded
+"computation" to 19.88e9. That alone broke the replay in three separate ways,
+all of them latent problems that the inflated delays had been hiding.
+
+**1. The clamp must not touch the first-window fallback.** When a node in the
+first window has no dependency at all, `writeDepTrace()` assigns its
+`comp_delay` an *absolute tick* rather than a delay:
+
+```cpp
+if (firstWin && temp_ptr->compDelay == -1) {
+    if (temp_ptr->isLoad())       temp_ptr->compDelay = temp_ptr->executeTick;
+    else if (temp_ptr->isStore()) temp_ptr->compDelay = temp_ptr->commitTick;
+    else                          temp_ptr->compDelay = temp_ptr->toCommitTick;
+}
+```
+
+`TraceCPU::init()` reads the first such value back through
+`ElasticDataGen::init()` and uses it to establish `traceOffset`, the replay's
+time origin. Clamping it reports a bogus origin -- the debug log showed
+`Execute tick of the first dependency free node 1 is 12000` where the real
+value is 81,500. The clamp therefore runs *before* that fallback, so it only
+touches genuine delays.
+
+Measured impact on these workloads: **none**. Capturing `stride` twice, once
+with the first-window value clamped to 12,000 and once with it left at 81,500,
+gives replays that agree to the tick (23,739,466,001 both times). The reason is
+that `traceOffset` is `min(first_icache_tick, first_dcache_tick)` and the
+instruction trace starts at tick 0, so the offset is 0 either way and the fetch
+side gates the start regardless of what the data side's first node says. The
+ordering is still wrong to rely on -- a trace whose fetch stream did not begin
+at 0 would shift -- but no number in this document depended on it.
+
+**2. TraceCPU goes permanently dormant when its ready list drains (latent
+upstream bug, not the cause of the stall below).** `ElasticDataGen::execute()`
+schedules its next event only when `readyList` is non-empty, or when
+`depFreeQueue` has a node with resources available. If both are empty, no
+event is scheduled and the generator can only be woken by
+`completeMemAccess()` on an outstanding response. That matters because
+`nextRead`, the flag requesting the next window of the trace, is acted on only
+at the *top* of `execute()`:
+
+```cpp
+if (nextRead) { readNextWindow(); nextRead = false; }
+```
+
+So the generator can set "read more next time" and then schedule no next time.
+The comment in `completeMemAccess()` states the assumption being relied on:
+
+> It could happen that the readyList is empty and we got here via a last
+> remaining response. So, either the trace is complete or there are pending
+> nodes in the depFreeQueue.
+
+That holds only while nodes linger in the `readyList` with execute ticks far
+in the future, which is what the inflated delays were doing. A branch was
+added to `execute()` to schedule a cycle ahead when nothing is ready, nothing
+is pending issue and no response is outstanding. **This did not fix the
+`stride` stall** -- the stall reproduced to the digit, at `numOps` 256,877 --
+so the reachable path is bug 3. The branch is kept because the hole is real.
+
+**3. Locked-RMW replay deadlocks against TraceCPU's scheduling (the actual
+stall).** x86 atomics reach the trace as `LOCKED_RMW` request flags, and
+`Packet::createRead`/`createWrite` turn those flags back into
+`LockedRMWReadReq`/`LockedRMWWriteReq` commands. The cache's protocol is that
+a locked read holds the block for the RMW interval and only the matching
+locked write releases it -- and when the locked read *misses*, the cache keeps
+its MSHR targets unserviced until that write arrives, withholding the read's
+response ("We are stopping servicing targets early for the Locked RMW Read
+until the write comes", `BaseCache::recvTimingResp`).
+
+TraceCPU cannot satisfy that. The write's register dependencies run through
+the instructions that compute the modified value from the read, so the write
+is not issued until the read's data returns. Each waits for the other. From
+the capped `stride` trace:
+
+```
+seq 304694  LOAD   0xb4744  plain
+seq 304701  LOAD   0xb4744  LOCKED_RMW                              <- locked read
+seq 304704  STORE  0xb4744  LOCKED_RMW  reg=[304699,304703] rob=[304687,304701]
+```
+
+A locked read that *hits* is fine, because the cache fakes an MSHR and still
+answers the read. That is why the deadlock is timing-dependent: with inflated
+delays the ordinary load at the same block completes first and leaves the line
+resident, so the locked read hits. Clamp the delays and the locked read
+coalesces with the still-outstanding miss from `seq 304694`, and both stay in
+flight forever. Four requests were stuck this way, two blocks' worth.
+
+One stuck node is enough to stop everything, because TraceCPU gates issue on
+the *span* between the oldest in-flight node and the candidate:
+
+```
+depGraph = 985, readyList = 0, depFreeQueue = 4, oldestInFlightRobNum = 256716
+Checking resources to issue seq. num 305226: #in-flight nodes = 256931 - 256716 = 215, LQ = 4/32
+Resources unavailable for seq. num 305226. Still pending issue.
+```
+
+215 against `sizeROB` of 192, forever.
+
+Fixed in `executeMemReq()` by clearing `LOCKED_RMW` and `LLSC` from the
+replayed request, counted by a new `numAtomicFlagsStripped` stat. TraceCPU
+models neither protocol in the first place; replaying them as ordinary
+accesses preserves the access stream and the recorded order dependency, which
+is all it does model. In `stride` this touched 58 of 10,516,024 records.
+
+### Diagnosing it: the failure looks like a DRAMPower performance problem
+
+The stall presents as a hang, not an error, and it is worth knowing what it
+looks like because the obvious reading is wrong. Simulated time keeps
+advancing, because DRAM refresh events are still scheduled, so gem5 races
+through empty time: the stalled `stride` replay reached **85.3 seconds** of
+simulated time against a 23.9 ms reference, at 920e9 ticks per host second,
+with the memory bus at 0.00% utilisation and 256,877 of 10.5M ops committed.
+Every backtrace lands in DRAMPower's `power_calc` under
+`DRAMInterface::Rank::processRefreshEvent`, which looks like a DRAMPower
+performance bug and is not.
+
+Two things that cost time here, worth avoiding next time:
+
+* `kill -USR1` dumps gem5's stats mid-run, which is how the numbers above were
+  obtained -- but the pid from `pgrep -f` may be the `timeout` wrapper rather
+  than gem5, and signalling the wrapper silently does nothing. An empty
+  `stats.txt` then looks like "the event queue is wedged" when the signal
+  simply never arrived.
+* `--debug-flags=TraceCPUData` with `--debug-file` is what actually localised
+  this: the per-node occupancy lines name the stuck in-flight node directly.
+  Piping the stream to `tail` instead does not work, since the pipeline is
+  killed before `tail` flushes.
+
+## The instruction trace sets a floor, and the capture's queue sizes set the floor
+
+The clamp stops the data side from overshooting, which raises a second
+question: what then determines the replay's runtime? For these memory-bound
+kernels, the answer is the *instruction* trace.
+
+`FixedRetryGen` replays instruction fetches at the recorded inter-fetch
+deltas, not at absolute positions:
+
+```cpp
+Tick last_tick = currElement.tick;
+...
+delta = currElement.tick - last_tick;     // trace_cpu.cc
+...
+schedule(icacheNextEvent, curTick() + icacheGen.tickDelta());
+```
+
+Those deltas are additive, so they sum to a hard lower bound on the replay's
+duration. Summing them directly out of `cpu0.inst.trace.gz`:
+
+| kernel | fetch floor | O3 reference | floor vs reference |
+|--------|------------:|-------------:|-------------------:|
+| stride | 23,739,423,000 | 23,902,814,500 | -0.68% |
+| seq    | 24,577,553,000 | 24,570,770,000 | +0.03% |
+| chase  | 96,223,121,000 | 94,246,345,500 | +2.10% |
+
+This is why the capped results must be read carefully. Capped `stride` lands
+at 23,739,466,001, which is 43,001 ticks -- 0.0002% -- above its floor. The
+agreement with the reference is therefore set by the fetch pacing, not by the
+data-side model. `chase` cannot do better than +2.10% whatever the data side
+does.
+
+### So capture at the sizes you will replay at
+
+The floor comes from the capture run, so the capture's ROB/LQ/SQ choice
+decides it. Capturing `stride` at the replay's sizes instead of oversized:
+
+```
+capture at ROB 512 / LQ 128 / SQ 128   ->  fetch floor 23,739,423,000  (-0.68%)
+capture at ROB 192 / LQ 32  / SQ 32    ->  fetch floor 23,902,812,000  (-0.00001%)
+O3 reference at ROB 192 / LQ 32 / SQ 32                 23,902,814,500
+```
+
+Capturing at the replay's sizes puts the floor within **2,500 ticks** of the
+reference. Those runs also confirm the probe itself is non-perturbing: given
+the same sizes as the reference, the capture reports `simTicks` of
+23,902,814,500 for `stride`, 94,246,345,500 for `chase`, 148,802,938,500 for
+`rand` and 6,854,296,000 for `l2` -- *exactly* the reference value in all four
+cases, to the tick -- so attaching `ElasticTrace` costs no simulated time. The whole -0.68%/+2.10% floor offset was the oversizing, not the probe.
+
+This contradicts the oversizing that `attach_probes()` does by default, and
+the reasoning behind it. Oversizing was meant to keep resource stalls out of
+`comp_delay`; it does not achieve that (measured above), and it does shift the
+fetch schedule away from the configuration being modelled. The recommended
+capture is therefore the replay's sizes plus `--comp-delay-cap`.
+
+## Measured: what the clamp recovers
+
+All rows are one core, replayed at ROB/LQ/SQ 192/32/32 against an O3 reference
+at the same sizes, and every capture is checksum-verified against native
+execution before its row is used. "uncapped" and "capped" differ only in
+`--comp-delay-cap 12000`; both legs ran on the same binary, and the uncapped
+replays reproduce the pre-change numbers to the tick, so the clamp is the only
+variable.
+
+| kernel | O3 reference | uncapped replay | capped replay | capped, matched-size capture |
+|--------|-------------:|----------------:|--------------:|-----------------------------:|
+| stride | 23,902,814,500 | +51.436% | -0.683% | **+0.0002%** |
+| seq    | 24,570,770,000 |  +9.724% | +0.028% | **+0.0007%** |
+| rand   |148,802,938,500 | +42.983% | -0.00005% | **+0.00009%** |
+| chase  | 94,246,345,500 |  +4.750% | +2.098% | **+0.0003%** |
+| l2     |  6,854,296,000 |  +0.880% | -0.097% | **-0.00004%** |
+
+The last column adds `--cap-rob 192 --cap-lq 32 --cap-sq 32`, i.e. capturing
+at the sizes being replayed, for the reason in the fetch-floor section above.
+With both changes the worst error across the five kernels is **+0.0007%**,
+against **+51.4%** before.
+
+The two changes are independent and fix different things. The clamp removes
+the double-counted memory back-pressure, which is what the large errors were.
+Matching the capture's queue sizes then removes the residual, which is not a
+data-side error at all but the fetch floor -- most visible on `chase`, where
+the clamp alone leaves +2.098% and the matched-size capture takes it to
++0.0003%.
+
+### The capped replay lands on the fetch floor
+
+The clamp does not make the data side *accurate*; it stops it from
+overshooting. Once it no longer overshoots, the instruction trace's fixed
+pacing decides the total, and it decides it very precisely:
+
+| kernel | fetch floor | capped replay | above floor |
+|--------|------------:|--------------:|------------:|
+| stride | 23,739,423,000 | 23,739,466,001 | +0.0002% |
+| seq    | 24,577,553,000 | 24,577,746,001 | +0.0008% |
+| rand   |148,802,788,000 |148,802,860,001 | +0.00005% |
+| chase  | 96,223,121,000 | 96,223,599,001 | +0.0005% |
+| l2     |  6,847,620,000 |  6,847,620,000 | +0.0000% |
+
+`l2` is the cleanest demonstration: its capped replay is *exactly* its fetch
+floor, to the tick. And as the control for the clamp being too blunt, `l2`
+matters most -- it is cache-resident, so it has almost no back-pressure to
+misattribute and little for the clamp to remove. It does not regress
+(+0.880% -> -0.097%), which is the evidence that clamping does not simply make
+every replay faster.
+
+So `chase`'s residual +2.098% against the reference is its floor offset, not a
+data-side error, and no amount of data-side work would remove it. Read the
+headline percentages with that in mind: after clamping, the error against the
+reference is essentially *the capture's fetch pacing versus the reference's
+runtime*, which is why matching the capture's queue sizes to the replay's
+matters more than anything else in the last column.
+
+### What the data side actually reproduces
+
+Totals are floor-masked, so the data-side model has to be judged on rates and
+latencies instead. For `stride`:
+
+| metric | O3 reference | uncapped replay | capped replay | capped, matched-size |
+|--------|-------------:|----------------:|--------------:|---------------------:|
+| DRAM read bus utilisation | 17.86% | 11.79% | 17.98% | **17.86%** |
+| data read avg latency | 54,871 | 55,825 | 54,897 | 55,588 |
+| L2 MSHR miss latency | 86,564 | 87,549 | 86,606 | - |
+| mem read queue length | 3.14 | 2.54 | 2.90 | 2.84 |
+| L2 accesses | 853,881 | 853,861 | 853,866 | 853,870 |
+
+Bus utilisation lands exactly on the reference, and the access stream was
+never in doubt (within 0.002% throughout). The honest residual is **memory
+level parallelism**: read queue depth 2.84-2.90 against the reference's 3.14,
+about 10% short. The clamp recovers most of the lost overlap -- uncapped sits
+at 2.54 -- but not all of it, because a single per-node delay cannot express
+the burstiness of a real out-of-order core's issue pattern. That is the next
+thing to attack, and it is a modelling limit rather than a bug.
+
+### Cost
+
+The clamp is free at replay time: `stride` replays in 14.67 host seconds
+capped against 13.80 uncapped, and `seq` is actually faster capped (27.77s vs
+36.60s) because it no longer simulates the inflated idle gaps.
+
+## Does a capped replay still respond to the memory system?
+
+The fetch floor raises a fair objection: if the replay's runtime is pinned to
+the instruction trace's pacing, can it still be used to evaluate a cache
+hierarchy or an interconnect -- which is the whole point of driving CHI with
+these traces? Measured, the answer is yes, but the obvious test gives the
+wrong answer first.
+
+Replaying capped `stride` while degrading the memory system barely moves it:
+
+| stride, capped | simTicks | vs baseline |
+|----------------|---------:|------------:|
+| 1MB L2         | 23,902,870,000 | - |
+| 128kB L2       | 23,902,959,000 | +0.0004% |
+| no L2          | 23,903,257,001 | +0.0016% |
+
+That looks like total insensitivity, and it is not. `stride` streams through an
+array with a **99.99% L2 miss rate** (853,804 of 853,870), so the L2 was doing
+nothing before it was removed. The test cannot measure what it appears to.
+
+Repeating it on `l2`, a kernel sized to live in the L2 (3.5% miss rate):
+
+| l2 kernel, capped | simTicks | vs baseline | L2 miss rate |
+|-------------------|---------:|------------:|-------------:|
+| 1MB L2            |  6,854,293,500 | -       | 3.5% |
+| no L2             | 11,203,371,500 | +63.5%  | -    |
+| 64kB L2           | 13,365,179,000 | +95.0%  | 99.97% |
+
+So the fetch floor is a **lower bound, not a ceiling**. A memory system at
+least as fast as the captured one leaves the replay sitting on the floor; make
+it slower and the data side pushes straight past it, by 63-95% here. The
+uncapped traces demonstrated the same thing in reverse -- their inflated
+`comp_delay` pushed `stride` 52% above the floor.
+
+(The 64kB L2 being *worse* than no L2 at all is correct, not a bug: it adds a
+lookup latency on the way to DRAM while missing 99.97% of the time.)
+
+### Consequence for hierarchy comparisons
+
+Replaying capped `stride` through this repo's Ruby CHI hierarchy instead of
+the classic L1/L2/XBar:
+
+```
+classic hierarchy, capped   23,902,870,000   58,000 ticks above floor
+CHI hierarchy, capped       23,902,815,000    3,000 ticks above floor
+fetch floor                 23,902,812,000
+O3 reference                23,902,814,500
+```
+
+Both land on the floor, so the two hierarchies appear identical in total
+runtime. For a DRAM-bound streaming kernel they genuinely are comparable, but
+the general lesson is that **total simTicks is a poor discriminator whenever
+the workload is not memory-bound at the level being studied**. Compare
+memory-side stats -- miss rates, MSHR latencies, bus utilisation, queue depths
+-- rather than tick counts, and pick workloads that actually stress the level
+of the hierarchy under test.
+
+## Trace replication, re-measured on capped traces
+
+The weak-scaling replication of section III-A4b was originally validated here
+on uncapped traces, so it was worth re-running once `comp_delay` was fixed.
+`stride`, captured at matched sizes with `--comp-delay-cap 12000`, replicated
+1 -> 2 -> 4 cores:
+
+| cores | simTicks | vs 1 core | L2 accesses | L2 miss rate |
+|------:|---------:|----------:|------------:|-------------:|
+| 1 | 23,902,870,000 | -       |   853,870 | 99.99% |
+| 2 | 27,854,512,000 | +16.5%  | 1,707,726 | 99.99% |
+| 4 | 37,710,199,500 | +57.8%  | 3,412,899 | 99.99% |
+
+Accesses scale exactly with core count, and so does the work: replication is
+**weak scaling**, so each core replays the *full* trace against its own slice
+of memory. Four cores means 4x the total work, not the same work split up --
+aggregate micro-ops go 10,619,504 -> 42,478,016, exactly 4.0000x, with every
+core executing an identical count.
+
+Runtime therefore has to be read as throughput, not as a slowdown:
+
+| cores | aggregate ops | simTicks | speedup | parallel efficiency |
+|------:|--------------:|---------:|--------:|--------------------:|
+| 1 | 10,619,504 | 23,902,870,000 | 1.000x | 100.0% |
+| 2 | 21,239,008 | 27,854,512,000 | 1.716x |  85.8% |
+| 4 | 42,478,016 | 37,710,199,500 | 2.535x |  63.4% |
+
+Four cores deliver 2.54x the throughput at 63% efficiency, which is DRAM
+bandwidth saturating on a streaming kernel. (Quoting the same data as "+57.8%
+runtime at 4 cores" is misleading, since the work quadrupled.)
+
+### Why the kernel is not split across the cores instead
+
+A single-threaded elastic trace is one sequential dependency graph: every
+record carries reg_dep/rob_dep edges to earlier records in the same stream.
+Partitioning it across cores would violate those edges, because one core's
+records depend on values produced by records handed to another. It would also
+invent parallelism the program never had, with no synchronisation where the
+real program would need it.
+
+Strong scaling requires the work to have been split *at capture time* -- one
+trace per thread, each with its own dependency graph, plus the sync trace so
+the arbiter can order critical sections. That needs FS mode (see above), so
+every multicore number in this document measures **memory-system contention
+under N symmetric streaming loads**. It says nothing about how an N-thread
+program behaves: there is no divergent control flow, no load imbalance, no true
+sharing, and nothing for the arbiter to arbitrate.
+
+### Address offsetting is not optional, and the miss rate will not tell you
+
+Replicating the same trace onto 4 cores *without* the address offset:
+
+```
+4 cores, offsets    37,710,199,500
+4 cores, no offsets 23,902,948,001     <- the 1-core floor
+```
+
+Skipping the offset makes a 4-core system look **37% cheaper than it is**, and
+essentially free relative to one core. The earlier note on this recorded the
+effect as a collapsing L2 miss rate. On a streaming kernel it is not that at
+all:
+
+| stat                       | 4c with offset | 4c no offset |
+|----------------------------|---------------:|-------------:|
+| L2 miss rate               | 99.99%         | 99.99%       |
+| L2 MSHR hits               | 2,412          | 2,364,217    |
+| DRAM read requests         | 3,410,227      | 853,697      |
+| DRAM read bus utilisation  | 45.22%         | 17.86%       |
+| mem read queue length      | 12.90          | 2.73         |
+| data read avg latency      | 127,624        | 55,492       |
+
+The channel is **MSHR coalescing**, not cache hits. Four cores requesting the
+same line have three of every four requests merged into the outstanding MSHR,
+so DRAM sees exactly the single-core request count (853,697 against the 1-core
+853,804) and the bus sits at 17.86%, the 1-core figure, instead of 45.22%.
+Latency is understated by 2.3x.
+
+The practical warning: **the L2 miss rate is identical (99.99%) in both cases**,
+so the metric most people would check detects nothing. Whether replication is
+double-counting sharing has to be checked on MSHR hits or DRAM request counts.
+A miss rate that collapses, as seen on cache-resident workloads, is only the
+version of this failure that happens to be visible.
+
+### Inflated comp_delay also breaks multicore scaling, in the flattering direction
+
+Replicating the *same* `stride` capture both ways, capped and uncapped, and
+replaying each on 1, 2 and 4 cores:
+
+| cores | capped          | vs 1c   | uncapped        | vs 1c   |
+|------:|----------------:|--------:|----------------:|--------:|
+| 1 | 23,902,870,000 | -       | 36,197,401,500 | -      |
+| 2 | 27,854,512,000 | +16.5%  | 37,317,347,500 | +3.1%  |
+| 4 | 37,710,199,500 | +57.8%  | 44,617,620,500 | +23.3% |
+
+The uncapped traces understate contention by **5.3x at two cores and 2.5x at
+four**. The reason is the same back-pressure double-count: a per-node delay of
+~208ns before each load spaces requests out far enough that the memory system
+is never driven hard enough to contend. Remove the inflation and four
+replicas saturate DRAM bandwidth, as they should.
+
+This is a second, independent reason the clamp matters. The single-core result
+showed inflation breaks *absolute* timing. This shows it also breaks the
+*relative* conclusions that weak-scaling studies are run to produce -- and it
+breaks them optimistically, which is the worse direction. Note also how the two
+errors interact misleadingly: an uncapped trace is ~50% too slow in absolute
+terms while making multicore scaling look ~2.5x better than it is. Any
+scaling conclusion drawn on this branch before the clamp should be re-measured.
+
+## Replay speed with the CHI hierarchy
+
+Measured on `stride` (6,895,009 x86 instructions / 10,618,045 micro-ops), same
+host, capped trace captured at matched sizes:
+
+| configuration | host | aggregate ops/s | aggregate insts/s | per-core insts/s |
+|---------------|-----:|----------------:|------------------:|-----------------:|
+| TraceCPU + classic L1/L2/XBar, 1 core |  16.0s | 0.663M | 0.431M | 0.431M |
+| TraceCPU + CHI (`gem5-chi-l2`), 1 core | 120.3s | 0.088M | 0.057M | 0.057M |
+| TraceCPU + CHI, 4 cores (replicated)   | 794.0s | 0.054M | 0.035M | 0.0087M |
+| O3 + classic, 1 core (the capture run) |  76.6s | 0.139M | 0.090M | 0.090M |
+
+**The CHI hierarchy costs 7.5x in host time** against the classic one for an
+identical trace and identical TraceCPU (120.3s vs 16.0s). That is Ruby/SLICC
+state-machine overhead and has nothing to do with the traces.
+
+**Scaling to 4 cores is super-linear: 6.6x the host time for 4x the work**,
+1.65x worse than linear. Aggregate throughput *falls* 39% (0.088 -> 0.054M
+ops/s) and per-core throughput falls 6.6x. gem5's event queue is
+single-threaded, so the 4 RN-Fs' coherence traffic is serialised onto one host
+thread. Extrapolating the same exponent puts 16 cores at roughly 3-4 host hours
+for this trace.
+
+### The replay speedup does not survive CHI
+
+With the classic hierarchy, replay is 4.8x faster than the O3 run it replaces
+(0.431 vs 0.090 M insts/s), consistent with the 6-8x the Elastic Traces paper
+claims. Route it through CHI and the replay becomes *slower* than that O3 run
+(0.057 vs 0.090).
+
+That comparison is not fair in either direction -- the O3 figure is O3 with the
+*classic* hierarchy, and Ruby CHI is expensive whatever CPU drives it. The
+question that decides whether trace replay is worth using for CHI studies is
+TraceCPU+CHI versus **O3+CHI**, which is not measured here: `capture.py` only
+builds the classic hierarchy, so it needs a config pairing an O3 CPU with
+`config/chi`. Until that exists, treat the speedup premise as unverified for
+CHI, and note that the 4-core figure above (0.035 M insts/s aggregate) is the
+realistic budget for CHI replay work.
+
+### One upside at 4 cores
+
+At 1 core, CHI and the classic hierarchy are indistinguishable in simulated
+time -- both sit on the fetch floor, 500 ticks apart. At 4 cores CHI is **+8.2%**
+slower than classic (40,802,519,500 vs 37,710,199,500), because coherence
+traffic finally shows up. So the "total simTicks cannot discriminate
+hierarchies" caveat above is a property of the single-core DRAM-bound case, not
+a general limit: once there is contention, the hierarchy does separate.
+
+## Where the host time actually goes: is Ruby the bottleneck?
+
+Profiled with `perf record -F 499`, both models on the *identical*
+`PrivateL1SharedL2CacheHierarchy`, same board, clock and memory. The O3 side
+needed a new config, `o3_chi.py`, because `capture.py` only builds the classic
+L1/L2/XBar -- comparing TraceCPU+CHI against an O3 run on the classic
+hierarchy is not a fair comparison and was the error in an earlier draft of
+these notes.
+
+### Across kernels, one core
+
+Sorted by memory intensity (L2 demand accesses per 1000 ops; see the note on
+why dcache misses are *not* a usable metric here):
+
+```
+  kernel    L2acc |  O3 Ruby  O3 CPU   O3 ops/s |  Tr Ruby  Tr CPU   Tr ops/s |  speedup  phase
+  l1         0.10 |    26.0%   50.4%    0.2664M |    40.0%   16.1%    0.8024M |    3.01x     ok
+  l2         5.26 |    30.8%   45.4%    0.2153M |    47.3%   13.7%    0.5472M |    2.54x   0.86
+  seq        5.57 |    30.3%   46.4%    0.2082M |    46.4%   13.8%    0.5720M |    2.75x   0.57
+  fp         7.15 |    25.9%   50.0%    0.2759M |    45.4%   14.3%    0.5954M |    2.16x     ok
+  rand      35.03 |    37.0%   39.7%    0.1144M |    65.0%    4.5%    0.1917M |    1.68x   0.60
+  chase     35.51 |    40.7%   34.8%    0.0991M |    64.6%    4.5%    0.1741M |    1.76x   0.57
+  stride    80.40 |    51.2%   25.2%    0.0574M |    68.6%    3.4%    0.0866M |    1.51x   0.86
+```
+
+`phase` is O3 ops / trace ops under an equal *host-time* budget; `ok` means
+both covered the same work. Only `l1` and `fp` are exactly phase-matched, so
+the other speedups are indicative. The trend holds across both groups.
+
+**Ruby's share tracks memory intensity and the speedup is its mirror image.**
+Over an 800x range in accesses per op, Ruby goes 26% -> 51% (O3) and 40% -> 69%
+(TraceCPU) while the speedup falls monotonically 3.01x -> 1.51x. Ruby is work
+neither model can skip, so its share in the replay sets the ceiling. Plain
+Amdahl.
+
+So "is Ruby the bottleneck" has a workload-dependent answer. For memory-bound
+kernels, yes -- 65-69% for replay. For cache-resident or compute-bound ones it
+is 40-47%, and on the O3 side the *CPU model* is the larger cost (50%).
+
+### TraceCPU's own cost is not negligible
+
+The replay machinery is 3.4-4.5% on memory-bound kernels but **13.7-16.1%** on
+the fast ones, because its cost is per *record* while the simulation's total
+time is dominated by *stalls*. Breaking down `l1` (the fastest, 0.80 M ops/s):
+
+| component | share |
+|-----------|------:|
+| Ruby | 40.0% |
+| TraceCPU dependency graph | 15.5% |
+| protobuf parsing | 11.6% |
+| allocation | 10.0% |
+| gzip inflate | 0.9% |
+| **trace machinery total** | **28.1%** |
+
+`protobuf::TcParser::VerifyHasBitConsistency` alone is 3.0%, pure validation
+overhead on a file gem5 wrote itself. `addDepsOnParent` walks a
+`std::list<unsigned long>` per node, which is behind much of the allocation.
+Both are optimisation targets if replay throughput ever matters.
+
+### Scaling to 16 cores (stride)
+
+```
+  model   cores     host     agg ops     ops/s   Ruby    net  proto  alloc    CPU
+  o3          1     159s   9,142,473   0.0574M  51.2%  22.7%  20.3%   6.8%  25.2%
+  o3          2     159s   7,689,766   0.0484M  46.5%  21.1%  18.2%   6.4%  30.2%
+  o3          4     158s   6,330,644   0.0401M  40.2%  18.3%  15.8%   5.5%  36.9%
+  o3          8     154s   6,136,565   0.0399M  32.9%  15.7%  12.2%   5.1%  43.5%
+  o3         16     135s   6,491,179   0.0480M  30.9%  18.5%   8.3%   4.2%  42.1%
+  trace       1     123s  10,619,504   0.0866M  68.6%  30.9%  26.9%   7.2%   3.4%
+  trace       2     159s  13,138,328   0.0826M  69.9%  32.4%  26.8%   7.2%   3.1%
+  trace       4     158s  10,728,255   0.0678M  72.0%  34.7%  26.9%   6.5%   2.7%
+  trace       8     156s  12,289,110   0.0787M  70.4%  35.8%  24.9%   6.2%   3.3%
+  trace      16     150s  15,253,095   0.1017M  64.6%  38.3%  18.6%   6.1%   4.2%
+```
+
+Two things here. **O3's Ruby share falls with core count (51% -> 31%) while
+TraceCPU's stays flat (65-72%).** O3 pays host time per simulated *cycle*, so
+contention-induced stalls inflate its CPU-model cost; TraceCPU is event-driven
+and pays per *access*, so its mix is unchanged. And **network/message handling
+overtakes the protocol**: for TraceCPU, MessageBuffer/PerfectSwitch/Throttle/
+routing go 30.9% -> 38.3% while CHI controller and cache work falls 26.9% ->
+18.6%. At 16 cores, message plumbing is the single largest consumer of the
+whole simulation.
+
+Because the eliminable fraction (O3's CPU model) *grows* with core count,
+**TraceCPU's advantage widens with scale: 1.51x, 1.71x, 1.69x, 1.97x, 2.12x**
+at 1/2/4/8/16 cores.
+
+Caveat: the `ops/s` column is not a scaling curve. An equal host-time budget
+means different core counts reach different program phases (9.1M ops/core at 1
+core versus 406K at 16, where the program is still in compute-bound libc
+startup), which is why aggregate throughput dips then rises. The speedup
+*ratios* are sound -- same core count, similar phase -- and the profiles are
+within-window fractions, so both are unaffected.
+
+### Why dcache misses are not a usable intensity metric here
+
+The obvious metric disagrees wildly between the models -- on `l2`, 15.4 dcache
+misses per 1000 ops for O3 against 63.8 for the replay. That is not an accuracy
+problem:
+
+| stat | o3_l2 | trace_l2 |
+|------|------:|---------:|
+| dcache accesses | 4,590,888 | 5,343,875 |
+| dcache misses | 428,803 | 2,062,740 |
+| L2 accesses | 146,212 | 169,834 |
+| L2 misses | 8,771 | 9,172 |
+
+If the replay really missed 2.06M times, L2 would see 2.06M accesses; it sees
+169,834. The extra misses never leave the L1 -- they are **MSHR-coalesced
+secondary misses**. The capped trace has high memory-level parallelism, so
+several accesses to one line are outstanding at once and Ruby counts each as a
+demand miss, where O3's LSQ would have merged or forwarded them before the
+cache saw them. Same coalescing mechanism as the replication study above.
+
+L2 accesses per 1000 ops is coalescing-independent and agrees to two decimals
+between the models (`l1` 0.10/0.10, `l2` 5.25/5.26), which is also a further
+check that the replay reproduces the memory behaviour.
