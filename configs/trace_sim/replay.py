@@ -37,6 +37,10 @@ def parse_args():
     p.add_argument("--l2-size", default="1MB")
     p.add_argument("--no-l2", action="store_true")
     # TraceCPU models these at replay; capture ran with them oversized.
+    p.add_argument("--progress", type=int, default=0, metavar="N",
+                   help="print a progress line every N committed ops "
+                        "(0 = silent). Useful to tell a slow replay from "
+                        "a stalled one.")
     p.add_argument("--rob", type=int, default=40)
     p.add_argument("--lq", type=int, default=16)
     p.add_argument("--sq", type=int, default=16)
@@ -101,6 +105,7 @@ def main():
             sizeROB=args.rob,
             sizeLoadBuffer=args.lq,
             sizeStoreBuffer=args.sq,
+            progressMsgInterval=args.progress,
         )
         for i in range(args.num_cores)
     ]

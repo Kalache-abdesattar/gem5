@@ -44,6 +44,25 @@ def parse_args():
                    help="run ONE multithreaded process across all cores "
                         "(pthreads land on free thread contexts) instead of "
                         "one independent process per core")
+    p.add_argument("--comp-delay-cap", type=int, default=0, metavar="TICKS",
+                   help="clamp each node's recorded computation delay to at "
+                        "most TICKS. The probe measures computation delay as "
+                        "the gap between a producer completing and its "
+                        "consumer executing, so it also absorbs time the "
+                        "consumer spent waiting on memory back-pressure "
+                        "(no free MSHRs, a full load queue, a stalled "
+                        "in-order commit). Replay pays that as a fixed "
+                        "pre-issue delay and its own memory model then "
+                        "regenerates the congestion, so the same latency is "
+                        "charged twice. A good value is the longest "
+                        "functional unit latency: 24 cycles = 12000 ticks at "
+                        "2GHz. 0 disables the clamp (upstream behaviour).")
+    p.add_argument("--cap-rob", type=int, default=512,
+                   help="ROB entries for the capture CPU (default 512)")
+    p.add_argument("--cap-lq", type=int, default=128,
+                   help="load queue entries for the capture CPU (default 128)")
+    p.add_argument("--cap-sq", type=int, default=128,
+                   help="store queue entries for the capture CPU (default 128)")
     p.add_argument("--cpu-clock", default="2GHz")
     p.add_argument("--mem-size", default="512MB")
     p.add_argument("--l1i-size", default="32kB")
@@ -134,13 +153,20 @@ def attach_probes(system, args):
             instFetchTraceFile="inst.trace.gz",
             dataDepTraceFile="data.trace.gz",
             depWindowSize=3 * cpu.numROBEntries,
+            compDelayCap=args.comp_delay_cap,
         )
-        # Deliberately oversized so the reference run does not stall on
+        # Oversized by default so the reference run does not stall on
         # resource limits; those stalls would be baked into the trace as
         # compute delay. TraceCPU models the real ROB/LQ/SQ at replay.
-        cpu.numROBEntries = 512
-        cpu.LQEntries = 128
-        cpu.SQEntries = 128
+        #
+        # Note this only helps for stalls caused by queue *capacity*. It does
+        # nothing for back-pressure from MSHRs or memory bandwidth, and a
+        # larger load queue lets more loads sit with their addresses resolved
+        # but unissued, which lengthens the delay recorded against each one.
+        # Use --cap-rob/--cap-lq/--cap-sq to capture at the replay's sizes.
+        cpu.numROBEntries = args.cap_rob
+        cpu.LQEntries = args.cap_lq
+        cpu.SQEntries = args.cap_sq
 
 
 def normalise_names(system, out_dir):
