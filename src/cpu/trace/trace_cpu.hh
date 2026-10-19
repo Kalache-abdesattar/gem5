@@ -1051,6 +1051,8 @@ class TraceCPU : public ClockedObject
             statistics::Scalar numSendFailed;
             statistics::Scalar numRetrySucceeded;
             statistics::Scalar numSplitReqs;
+            /** Nodes whose atomic request flags could not be replayed */
+            statistics::Scalar numAtomicFlagsStripped;
             statistics::Scalar numSOLoads;
             statistics::Scalar numSOStores;
             /** Tick when ElasticDataGen completes execution */

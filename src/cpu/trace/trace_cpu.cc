@@ -255,6 +255,9 @@ ElasticDataGenStatGroup::ElasticDataGenStatGroup(statistics::Group *parent,
              "Number of successful retries"),
     ADD_STAT(numSplitReqs, statistics::units::Count::get(),
              "Number of split requests"),
+      ADD_STAT(numAtomicFlagsStripped, statistics::units::Count::get(),
+               "Number of requests whose LOCKED_RMW/LLSC flags were cleared "
+               "because TraceCPU cannot replay a paired atomic"),
     ADD_STAT(numSOLoads, statistics::units::Count::get(),
              "Number of strictly ordered loads"),
     ADD_STAT(numSOStores, statistics::units::Count::get(),
@@ -571,6 +574,28 @@ TraceCPU::ElasticDataGen::execute()
         DPRINTF(TraceCPUData, "Attempting to schedule @%lli.\n",
                 owner.clockEdge(Cycles(1)));
         owner.schedDcacheNextEvent(owner.clockEdge(Cycles(1)));
+    } else if (nextRead && !hwResource.awaitingResponse()) {
+        // Nothing is ready to execute, nothing is pending issue, and no
+        // memory response is outstanding that would call us back through
+        // completeMemAccess(). Without an event here this generator goes
+        // dormant permanently: the pending nextRead is only acted upon at
+        // the top of execute(), so the next window is never read and the
+        // nodes that would become dependency-free are never loaded.
+        //
+        // The code above assumes that an empty readyList implies either a
+        // complete trace or nodes waiting in depFreeQueue. That holds only
+        // while nodes linger in the readyList with execute ticks far in the
+        // future. A trace whose nodes issue promptly -- for instance one
+        // captured with ElasticTrace's compDelayCap set -- drains the
+        // readyList faster than the window is refilled and breaks it.
+        //
+        // Gated on nextRead so this cannot turn into a one-cycle spin: the
+        // window read always yields at least one issuable node, because the
+        // earliest node it loads has no surviving parent in the graph.
+        DPRINTF(TraceCPUData, "Nothing ready and no response outstanding; "
+                "scheduling @%lli to refill the window.\n",
+                owner.clockEdge(Cycles(1)));
+        owner.schedDcacheNextEvent(owner.clockEdge(Cycles(1)));
     }
 
     // If trace is completely read, readyList is empty and depGraph is empty,
@@ -614,9 +639,40 @@ TraceCPU::ElasticDataGen::executeMemReq(GraphNode* node_ptr)
         ++elasticStats.numSplitReqs;
     }
 
+    // TraceCPU cannot participate in the locked-RMW or LLSC protocols, so
+    // clear those flags rather than let Packet::createRead/createWrite turn
+    // them into LockedRMWReadReq/LockedRMWWriteReq commands.
+    //
+    // The protocol deadlocks against the way TraceCPU schedules. When a
+    // locked read misses, the cache holds its MSHR targets unserviced until
+    // the matching locked write arrives, so the read's response is withheld
+    // (see the "stopping servicing targets early for the Locked RMW Read"
+    // path in BaseCache::recvTimingResp). But the write cannot be issued
+    // until the read's data has come back, because the write's register
+    // dependencies run through the instructions that compute the modified
+    // value from it. Each waits for the other.
+    //
+    // A locked read that *hits* is fine, because the cache fakes an MSHR and
+    // still answers the read. That is why the deadlock is timing-dependent
+    // and stays hidden on traces with inflated comp_delay values: the spacing
+    // lets the block land in the cache first. Clamping comp_delay closes the
+    // gap, the locked read coalesces with the still-outstanding miss from an
+    // ordinary load to the same block, and both stay in flight for good.
+    // Since TraceCPU gates issue on the span between the oldest in-flight
+    // node and the candidate, one such node wedges the whole ROB window and
+    // the replay stalls permanently.
+    //
+    // Replaying them as ordinary accesses keeps the access stream and the
+    // recorded order dependency, which is all TraceCPU models anyway.
+    Request::FlagsType req_flags = node_ptr->flags;
+    if (req_flags & (Request::LOCKED_RMW | Request::LLSC)) {
+        req_flags &= ~(Request::LOCKED_RMW | Request::LLSC);
+        ++elasticStats.numAtomicFlagsStripped;
+    }
+
     // Create a request and the packet containing request
     auto req = std::make_shared<Request>(
-        node_ptr->physAddr, node_ptr->size, node_ptr->flags, requestorId);
+        node_ptr->physAddr, node_ptr->size, req_flags, requestorId);
     req->setReqInstSeqNum(node_ptr->seqNum);
 
     // If this is not done it triggers assert in L1 cache for invalid contextId
@@ -627,7 +683,7 @@ TraceCPU::ElasticDataGen::executeMemReq(GraphNode* node_ptr)
     // of the request.
     if (node_ptr->virtAddr != 0) {
         req->setVirt(node_ptr->virtAddr, node_ptr->size,
-                     node_ptr->flags, requestorId, node_ptr->pc);
+                     req_flags, requestorId, node_ptr->pc);
         req->setPaddr(node_ptr->physAddr);
         req->setReqInstSeqNum(node_ptr->seqNum);
     }
