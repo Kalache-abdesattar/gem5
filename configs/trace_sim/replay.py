@@ -48,6 +48,23 @@ def parse_args():
                    help="honour the per-core sync traces via a SyncArbiter "
                         "(ElasticSimMATE). Without this the TraceCPUs replay "
                         "independently and every barrier is invisible.")
+    p.add_argument("--cpu-model", choices=("trace", "interval"),
+                   default="trace",
+                   help="trace = TraceCPU, replays the recorded schedule "
+                        "(comp_delay, rob_dep). interval = IntervalCPU, "
+                        "uses only types, addresses and register deps from "
+                        "the same data trace and computes its own timing; "
+                        "the inst trace is not needed (it fetches by PC).")
+    p.add_argument("--dispatch-width", type=int, default=4,
+                   help="IntervalCPU only")
+    p.add_argument("--issue-width", type=int, default=6,
+                   help="IntervalCPU only")
+    p.add_argument("--commit-width", type=int, default=4,
+                   help="IntervalCPU only")
+    p.add_argument("--iq", type=int, default=64,
+                   help="IntervalCPU issue queue entries")
+    p.add_argument("--no-fetch", action="store_true",
+                   help="IntervalCPU: ideal front end (no icache fetches)")
     return p.parse_args()
 
 
@@ -70,11 +87,13 @@ class L2(Cache):
 def main():
     args = parse_args()
 
+    interval = args.cpu_model == "interval"
+
     traces = []
     for i in range(args.num_cores):
         inst_f = os.path.join(args.trace_dir, f"cpu{i}.inst.trace.gz")
         data_f = os.path.join(args.trace_dir, f"cpu{i}.data.trace.gz")
-        for f in (inst_f, data_f):
+        for f in ((data_f,) if interval else (inst_f, data_f)):
             if not os.path.isfile(f):
                 fatal("missing trace: %s", f)
         sync_f = os.path.join(args.trace_dir, f"cpu{i}.sync.trace.gz")
@@ -96,19 +115,39 @@ def main():
         # not register, and the barrier would wait forever for it.
         system.arbiter = SyncArbiter(num_cpus=0)
 
-    system.cpu = [
-        TraceCPU(
-            instTraceFile=traces[i][0],
-            dataTraceFile=traces[i][1],
-            syncTraceFile=traces[i][2],
-            arbiter=(system.arbiter if args.sync else NULL),
-            sizeROB=args.rob,
-            sizeLoadBuffer=args.lq,
-            sizeStoreBuffer=args.sq,
-            progressMsgInterval=args.progress,
-        )
-        for i in range(args.num_cores)
-    ]
+    if interval:
+        system.cpu = [
+            IntervalCPU(
+                dataTraceFile=traces[i][1],
+                syncTraceFile=traces[i][2],
+                threadId=i,
+                arbiter=(system.arbiter if args.sync else NULL),
+
+                dispatchWidth=args.dispatch_width,
+                issueWidth=args.issue_width,
+                commitWidth=args.commit_width,
+                robSize=args.rob,
+                iqSize=args.iq,
+                lqSize=args.lq,
+                sqSize=args.sq,
+                fetchEnabled=not args.no_fetch,
+            )
+            for i in range(args.num_cores)
+        ]
+    else:
+        system.cpu = [
+            TraceCPU(
+                instTraceFile=traces[i][0],
+                dataTraceFile=traces[i][1],
+                syncTraceFile=traces[i][2],
+                arbiter=(system.arbiter if args.sync else NULL),
+                sizeROB=args.rob,
+                sizeLoadBuffer=args.lq,
+                sizeStoreBuffer=args.sq,
+                progressMsgInterval=args.progress,
+            )
+            for i in range(args.num_cores)
+        ]
 
     if not args.no_l2:
         system.l2bus = L2XBar()
@@ -140,7 +179,10 @@ def main():
     root = Root(full_system=False, system=system)
     m5.instantiate()
 
-    print(f"[trace_sim] replay: {args.num_cores} TraceCPU(s) "
+    model = ("IntervalCPU" if interval else "TraceCPU")
+    widths = (f"W={args.dispatch_width}/{args.issue_width}/"
+              f"{args.commit_width} IQ={args.iq} " if interval else "")
+    print(f"[trace_sim] replay: {args.num_cores} {model}(s) {widths}"
           f"ROB={args.rob} LQ={args.lq} SQ={args.sq} "
           f"sync={'on' if args.sync else 'OFF (independent streams)'}")
     exit_event = m5.simulate()

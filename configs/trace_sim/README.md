@@ -1598,3 +1598,250 @@ cache saw them. Same coalescing mechanism as the replication study above.
 L2 accesses per 1000 ops is coalescing-independent and agrees to two decimals
 between the models (`l1` 0.10/0.10, `l2` 5.25/5.26), which is also a further
 check that the replay reproduces the memory behaviour.
+
+## Accuracy at 16 cores: the comp_delay cap is a single-core result
+
+Everything above about `compDelayCap` was validated on **one** core, where it
+takes the worst error from +51.4% to +0.0002%. At 16 cores it does not hold,
+and the reason is structural rather than a tuning problem.
+
+### Measuring it requires capturing from the reference run
+
+A 16-core accuracy figure cannot be obtained by comparing the two multicore
+setups used elsewhere in these notes. An O3 run of N independent processes and
+a replay of N address-offset replicas of a *single-core* capture are different
+workloads: different footprints, different sharing. Comparing their tick counts
+measures that mismatch, not model error.
+
+`o3_chi.py --etrace` therefore attaches `ElasticTrace` to every core of the
+reference run itself, so each core's trace carries that core's own addresses
+and the replay faces the same workload. Both sides use the same three-level
+CHI hierarchy and the same 192/32/32 queue sizes.
+
+### Results
+
+500k instructions per core, 16 cores, three-level CHI:
+
+```
+  kernel       ref ticks  capped@12k   uncapped   better
+  l1               0.51e9      -3.46%    +20.77%   capped
+  fp               1.52e9      -3.63%     +8.30%   capped
+  l2               1.59e9      -0.87%     +9.16%   capped
+  seq              1.69e9      -3.38%     +8.80%   capped
+  store            1.70e9      -3.37%     +8.97%   capped
+  rand             2.10e9      -4.09%     +8.10%   capped
+  chase            4.05e9      -5.42%     +4.44% uncapped
+  stride          18.27e9      -6.38%     +2.75% uncapped
+  mean |e|                      3.82%      8.91%
+  max |e|                       6.38%     20.77%
+  sign                       all fast   all slow
+```
+
+**Replay is accurate to ~4% mean, 6.4% worst case — three to four orders of
+magnitude worse than the single-core 0.0007%.** The elastic format records no
+cross-core ordering, so each TraceCPU replays its own dependency graph in
+isolation and the contention pattern through the shared L3 is whatever emerges.
+No cap setting fixes that.
+
+### The two error sources have opposite signs
+
+Across all eight kernels, without exception:
+
+* **capped replay is too fast** -- the cap discards delay that, at 16 cores, is
+  partly genuine contention for the shared L3, and the replay cannot regenerate
+  it.
+* **uncapped replay is too slow** -- it double-counts back-pressure, the same
+  mechanism as at single core.
+
+They also move oppositely with memory intensity: capped degrades
+(-0.87% -> -6.38%) while uncapped improves (+20.77% -> +2.75%), crossing over
+around 2-4e9 reference ticks. Because the errors bracket zero, **an
+intermediate cap would beat both**, and its best value scales with contention.
+12000 is right for cache-resident work and too aggressive for memory-bound work.
+
+Note the capped errors cluster near -3.4% almost regardless of intensity
+(`l1` -3.46, `seq` -3.38, `store` -3.37, `fp` -3.63). That looks like a
+structural TraceCPU floor -- most likely the issue-order heuristics that give
+dependency-free nodes an artificial ordering -- with the contention-discard
+error added on top as intensity rises. Two causes, not one.
+
+### The window length matters as much as the cap
+
+The same `l2` comparison at 2M instructions per core instead of 500k:
+
+| window | capped | uncapped |
+|--------|-------:|---------:|
+| 500k insts/core |  -0.87% | +9.16% |
+| 2M insts/core   | -11.36% | +4.18% |
+
+The capped error grows sharply with window length, because a longer run spends
+proportionally more time in steady state where contention accumulates, and less
+in compute-bound libc startup. **So ~4% is a floor, not a ceiling**: a
+full-program 16-core run should be expected to do worse. 500k was used for the
+table above because `stride` at 2M exceeded a 50-minute budget for the
+reference capture alone -- itself a reminder that capturing elastic traces from
+16 O3 cores on a Ruby hierarchy is expensive enough to need a bounded ROI.
+
+Raw results: `out/accuracy16/`.
+
+## Inserting delays into Pin traces: how far a model gets
+
+The Pin path assigned a flat 500 ticks to every record, and replayed 50-68%
+too fast. This is what can be recovered using only information Pin can
+observe, and where it stops.
+
+### What the ground truth looks like
+
+Measured from gem5's own capped elastic traces, sampled past program startup:
+
+| record type | gem5 median | Pin emitted | error |
+|-------------|------------:|------------:|------:|
+| LOAD  | **12,000** | 500 | **24x too small** |
+| STORE | 1,000-1,500 | 500 | 2-3x |
+| COMP  | 0-500 | 500 | about right |
+
+The whole under-serialisation is the load delay. Two things about it are not
+what you would guess:
+
+* **It is not cache-miss latency.** In steady state 99.6% of loads in the
+  L1-resident kernel sit at the 12,000 cap, the same as the DRAM-bound ones.
+  It is issue queueing -- the load waiting with its address already computed --
+  which happens regardless of where the data comes from. A cache model in Pin
+  would therefore not predict it.
+* **The PC barely predicts it.** Static instruction identity explains only
+  31-65% of the variance (65% for loads, 40% stores, 32% comps), so a
+  per-opcode table cannot carry the model on its own.
+
+### The predictor Pin can compute
+
+Not the producer's *type*: in x86 **100% of load producers are COMP** micro-ops,
+because every load's address comes from an address-computation uop. That field
+carries no information.
+
+What works is the **sequence distance from a record back to its nearest
+dependency producer**, which the pintool already tracks via last-writer per
+register. On `chase` the distance alone separates the two timing modes
+completely:
+
+```
+  seq distance   n        p50 delay
+  1              29,244      500
+  9-16           29,243   12,000
+```
+
+Mechanism: an address computed in the immediately preceding uop lets the load
+issue right behind it; a producer several uops back means the load has been
+sitting in the queue. `etrace_to_elastic.py --delay-model table` (now the
+default) applies a (type, distance) -> median table built from this.
+
+### Measured improvement
+
+One core, classic hierarchy, 192/32/32, against the validated O3 references.
+All five `flat` numbers reproduce the original A/B/C sweep to within 0.2pp,
+so the comparison is sound.
+
+```
+  kernel           O3 ref   flat err  table err  error cut
+  l1        3,389,734,000    -55.64%    -15.15%        73%
+  l2        6,854,296,000    -58.09%    -26.29%        55%
+  fp       12,741,079,000    -42.69%    -35.92%        16%
+  seq      24,570,770,000    -50.30%    -41.06%        18%
+  store    30,131,150,000    -63.38%    -62.38%         2%
+  mean |e|                    54.02%     36.16%        33%
+```
+
+Mean error 54% -> 36%, and **no kernel regressed**. But the spread (73% down to
+2%) matters more than the mean.
+
+### Why the two-feature model stops at ~36%
+
+**Producer distance does not generalise across workloads.** At the same
+distance 6, a load takes 12,000 ticks in `l1`/`l2`/`seq`/`stride` but **500** in
+`fp` -- the mapping inverts, so the table mispredicts `fp`'s loads by 24x in the
+wrong direction. It still nets an improvement there only because the per-type
+correction to stores and comps outweighs the harm.
+
+That was a methodology error worth recording: `seq` and `fp` traces are 45M and
+31M records, far longer than the 3-4M window the table was derived from, so
+neither contributed steady-state data. The table was fitted on
+`l1`/`l2`/`chase`/`stride` and then tested on kernels it had never seen.
+Anyone re-deriving it should sample proportionally to trace length.
+
+`store` barely moved (2%) for a related reason: it is store-only, and its
+stores want 1,000 where the table says 1,500.
+
+### Adding the opcode: --delay-model table3
+
+Both items above were then done, and they work as predicted.
+
+The pintool now carries `INS_Opcode` in its static `InstDesc` and appends the
+id as the **last** record field, so a parser written for the old layout still
+reads every field it knew. Pin opcode ids are build specific, so the tool also
+writes a `<prefix>.opcodes.txt` legend at exit; the converter reads it and
+reduces each mnemonic to a functional-unit class. A numeric id plus a legend
+was chosen over emitting mnemonic strings to keep the record hot path cheap.
+
+Both sides classify rather than match raw names, because objdump (used to
+derive the table from gem5 traces, which record only the PC) and Pin spell
+mnemonics differently.
+
+The class is what separates cases `(type, distance)` conflates. At **LOAD
+distance 5-8**:
+
+| opcode class | p50 delay |
+|--------------|----------:|
+| `INT_ALU` | 12,000 |
+| `FP_MOV`  | 500 |
+| `MOV`     | 500 |
+
+That is `l1`'s integer loads and `fp`'s SSE loads, previously averaged
+together. The table was also re-derived sampling each kernel at **30/55/80% of
+its own trace length** instead of a fixed window, so the long traces now
+contribute.
+
+```
+  kernel        flat     table    table3     best
+  l1         -55.64%   -15.15%   -19.78%    table
+  l2         -58.09%   -26.29%   -27.27%    table
+  fp         -42.69%   -35.92%   -14.08%   table3
+  seq        -50.30%   -41.06%   -42.28%    table
+  store      -63.38%   -62.38%   -61.86%   table3
+  mean |e|    54.02%    36.16%    33.05%
+```
+
+**54% -> 36% -> 33% mean error.** The mean understates what happens: `table3`
+cuts `fp` by 61%, the one workload class distance alone gets wrong, and costs
+1-5 points on the three where distance was already adequate (more features mean
+fewer samples per cell). It is the default because it is better on the mean,
+much better on the case the simpler model fails, and never worse by more than
+4.6 points. For integer/memory-bound work only, `--delay-model table` is
+marginally better.
+
+**A warning for anyone extending this.** The first `table3` attempt replayed
+**+228%** -- a 3.3x over-serialisation -- from a fallback bug, not the method.
+For a (type, distance, class) cell that was never measured, it fell back to the
+median of the *class-specific* medians at that (type, distance). Classes seen
+fewer than 300 times were dropped when building the table, so the survivors
+skew slow: LOAD at distance 1 fell back to 12000 where the population median is
+500. The fallback now goes to the two-feature table, which holds population
+medians. With layered models the fallback for sparse cells matters more than
+the cells themselves.
+
+### What would be needed to do better still
+
+Three delay sources are now in play, all from information Pin genuinely has:
+per-type medians, producer distance, and opcode class. Together they take 54%
+to 33%.
+
+The remaining third looks structural. `comp_delay` encodes dynamic pipeline
+state -- issue queueing, LSQ occupancy, commit pressure, squashed speculative
+work -- and a static table over a few features captures the part that is
+stable across workloads and misses the part that is not. Going much below ~33%
+would require Pin to model the pipeline, at which point it is a CPU model
+rather than a tracer and the cheap-capture premise is gone.
+
+**Positioning:** this makes the Pin path meaningfully better for cache and
+coherence studies, where the access *stream* is what matters and was always
+reproduced within a fraction of a percent. It does not make it a
+timing-accurate substitute for gem5-captured elastic traces, which reach
+~0.0007% at one core.

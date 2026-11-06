@@ -40,6 +40,14 @@ def parse_args():
     p.add_argument("--cmd", required=True, help="workload binary")
     p.add_argument("--options", default="", help="workload arguments")
     p.add_argument("--num-cores", type=int, default=1)
+    p.add_argument("--env", action="append", default=[], metavar="K=V",
+                   help="environment variable for the simulated process "
+                        "(repeatable)")
+    p.add_argument("--prog-output", default="cout", metavar="FILE",
+                   help="simulated program's stdout (file in the output "
+                        "directory, or cout)")
+    p.add_argument("--prog-errout", default="cerr", metavar="FILE",
+                   help="simulated program's stderr (file or cerr)")
     p.add_argument("--threaded", action="store_true",
                    help="run ONE multithreaded process across all cores "
                         "(pthreads land on free thread contexts) instead of "
@@ -203,6 +211,9 @@ def main():
         proc = Process(pid=100)
         proc.executable = args.cmd
         proc.cmd = [args.cmd] + proc_args
+        proc.env = args.env
+        proc.output = args.prog_output
+        proc.errout = args.prog_errout
         for cpu in system.cpu:
             cpu.workload = proc
             cpu.createThreads()
@@ -211,6 +222,9 @@ def main():
             proc = Process(pid=100 + i)
             proc.executable = args.cmd
             proc.cmd = [args.cmd] + proc_args
+            proc.env = args.env
+            proc.output = args.prog_output
+            proc.errout = args.prog_errout
             cpu.workload = proc
             cpu.createThreads()
 

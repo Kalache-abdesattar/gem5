@@ -24,7 +24,13 @@ from m5.objects import *
 from m5.util import fatal
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# config/ lives two levels above gem5/configs/trace_sim
+_REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+if _REPO not in sys.path:
+    sys.path.insert(0, _REPO)
+
 from trace_board import TraceBoard          # noqa: E402
+from replay_chi import chi_cache_configs    # noqa: E402  (same dicts as PARSEC)
 
 
 def o3_cpu_class():
@@ -40,6 +46,19 @@ def parse_args():
     p = argparse.ArgumentParser(description="trace_sim: O3 on the CHI hierarchy")
     p.add_argument("--cmd", required=True)
     p.add_argument("--options", default="")
+    p.add_argument("--prog-output", default="cout", metavar="FILE",
+                   help="simulated program's stdout: a file in the output "
+                        "directory, or cout (gem5's stdout)")
+    p.add_argument("--prog-errout", default="cerr", metavar="FILE",
+                   help="simulated program's stderr (file or cerr)")
+    p.add_argument("--env", action="append", default=[], metavar="K=V",
+                   help="environment variable for the simulated process "
+                        "(repeatable), e.g. OMP_NUM_THREADS=2")
+    p.add_argument("--threaded", action="store_true",
+                   help="run ONE multithreaded process across all cores "
+                        "(pthread_create clones onto free contexts), as "
+                        "capture.py --threaded; SE has no scheduler, so "
+                        "--num-cores must cover every thread")
     p.add_argument("--num-cores", type=int, default=1)
     p.add_argument("--clock", default="2GHz")
     p.add_argument("--mem-size", default="4GB")
@@ -48,12 +67,38 @@ def parse_args():
     p.add_argument("--sq", type=int, default=32)
     p.add_argument("--l1-size", default="32kB")
     p.add_argument("--l2-size", default="256kB")
+    p.add_argument("--stats-period", type=int, default=0, metavar="TICKS",
+                   help="dump stats every TICKS (0 = only at the end)")
     p.add_argument("--maxinsts", type=int, default=0,
                    help="stop after N instructions per core (0 = run to "
                         "completion). Use this when profiling, so every core "
                         "count does the same amount of work.")
-    p.add_argument("--hierarchy", choices=("gem5-chi-l2", "gem5-chi-l1"),
-                   default="gem5-chi-l2")
+    p.add_argument("--hierarchy",
+                   choices=("gem5-chi-l2", "gem5-chi-l1", "repo-l3"),
+                   default="gem5-chi-l2",
+                   help="repo-l3 = config/chi/l3_cache_hierarchy.py, the "
+                        "three-level CHI hierarchy this repo's PARSEC runs use")
+    p.add_argument("--l3-size", default="4MiB")
+    p.add_argument("--cores-per-cluster", type=int, default=4,
+                   help="cores sharing an L2 (repo-l3 only)")
+    p.add_argument("--num-l3-slices", type=int, default=1)
+    p.add_argument("--l3-mshr-sample-period", type=int, default=0,
+                   metavar="CYCLES",
+                   help="repo-l3 only: sample each L3 slice's MSHR "
+                        "occupancy and secondary misses every CYCLES L3 "
+                        "cycles, into <slice>.mshr_samples.csv.gz in the "
+                        "output directory (0 = off)")
+    p.add_argument("--chi-data-channel-size", type=int, default=32,
+                   help="CHI DAT channel width in bytes (repo-l3 only). 64 "
+                        "matches the Questa DUT but breaks gem5's L3 path.")
+    p.add_argument("--etrace", action="store_true",
+                   help="attach ElasticTrace to every core, so this run is "
+                        "both the O3 reference AND the source of the traces "
+                        "replayed against it. Accuracy can only be measured "
+                        "this way: replicated single-core traces are a "
+                        "different workload from N independent processes.")
+    p.add_argument("--comp-delay-cap", type=int, default=12000, metavar="TICKS",
+                   help="clamp recorded computation delay (see ElasticTrace)")
     p.add_argument("--send-evicts", action="store_true", default=True,
                    help="O3 keeps speculative LSQ state, so the L1 must "
                         "notify it of evictions. Unlike TraceCPU this is not "
@@ -84,10 +129,24 @@ def main():
 
     proc_args = args.options.split() if args.options else []
     board.workload = SEWorkload.init_compatible(args.cmd)
+    shared = None
+    if args.threaded:
+        shared = Process(pid=100)
+        shared.executable = args.cmd
+        shared.cmd = [args.cmd] + proc_args
+        shared.env = args.env
+        shared.output = args.prog_output
+        shared.errout = args.prog_errout
     for i, cpu in enumerate(cpus):
-        proc = Process(pid=100 + i)
-        proc.executable = args.cmd
-        proc.cmd = [args.cmd] + proc_args
+        if shared is not None:
+            proc = shared
+        else:
+            proc = Process(pid=100 + i)
+            proc.executable = args.cmd
+            proc.cmd = [args.cmd] + proc_args
+            proc.env = args.env
+            proc.output = args.prog_output
+            proc.errout = args.prog_errout
         cpu.workload = proc
         cpu.createThreads()
         if args.maxinsts:
@@ -100,10 +159,28 @@ def main():
         hierarchy = PrivateL1SharedL2CacheHierarchy(
             l1_size=args.l1_size, l1_assoc=8,
             l2_size=args.l2_size, l2_assoc=8)
-    else:
+    elif args.hierarchy == "gem5-chi-l1":
         from gem5.components.cachehierarchies.chi.private_l1_cache_hierarchy \
             import PrivateL1CacheHierarchy
         hierarchy = PrivateL1CacheHierarchy(size=args.l1_size, assoc=8)
+    else:
+        # gem5's CHI breaks when the DAT channel is as wide as the cache line
+        # (the repo default of 64 matches the Questa DUT); use two beats here.
+        import config.chi.nodes.abstract_node as _an
+        _an.CHI_DATA_CHANNEL_SIZE = args.chi_data_channel_size
+        l1_config, l2_config, l3_config = chi_cache_configs()
+        l1_config["size"] = args.l1_size
+        l2_config["size"] = args.l2_size
+        l3_config["size"] = args.l3_size
+        l3_config["mshr_sample_period"] = args.l3_mshr_sample_period
+        from config.chi.l3_cache_hierarchy import L3CacheHierarchy
+        hierarchy = L3CacheHierarchy(
+            l1_config=l1_config,
+            l2_config=l2_config,
+            l3_config=l3_config,
+            cores_per_cluster=args.cores_per_cluster,
+            num_l3_slices=args.num_l3_slices,
+        )
 
     board.cache_hierarchy = hierarchy
     hierarchy.incorporate_cache(board)
@@ -116,9 +193,21 @@ def main():
         if d is not None and hasattr(d, "enable_DMT"):
             d.enable_DMT = False
 
+    if args.etrace:
+        # Must happen before instantiate(): probes are SimObjects too.
+        for cpu in cpus:
+            cpu.traceListener = ElasticTrace(
+                instFetchTraceFile="inst.trace.gz",
+                dataDepTraceFile="data.trace.gz",
+                depWindowSize=3 * cpu.numROBEntries,
+                compDelayCap=args.comp_delay_cap,
+            )
+
     root = Root(full_system=False, system=board)
     root.system.mem_mode = "timing"
     m5.instantiate()
+    if args.stats_period:
+        m5.stats.periodicStatDump(args.stats_period)
 
     print(f"[trace_sim] O3 on CHI: {args.num_cores} core(s) "
           f"hierarchy={args.hierarchy} ROB={args.rob} "
@@ -126,6 +215,19 @@ def main():
           f"maxinsts={args.maxinsts or 'unlimited'}")
     exit_event = m5.simulate()
     print(f"[trace_sim] done @ tick {m5.curTick()}: {exit_event.getCause()}")
+
+    if args.etrace:
+        # ElasticTrace writes <simobject path>.<param>; rename to the cpuN.*
+        # scheme replay_chi.py expects.
+        out_dir = m5.options.outdir
+        for i, cpu in enumerate(cpus):
+            base = cpu.traceListener.path()
+            for kind in ("inst", "data", "sync"):
+                src = os.path.join(out_dir, f"{base}.{kind}.trace.gz")
+                dst = os.path.join(out_dir, f"cpu{i}.{kind}.trace.gz")
+                if os.path.exists(src):
+                    os.replace(src, dst)
+        print(f"[trace_sim] traces written for {len(cpus)} core(s)")
 
 
 if __name__ == "__m5_main__":

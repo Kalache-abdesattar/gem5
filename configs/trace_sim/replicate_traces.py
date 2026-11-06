@@ -77,6 +77,35 @@ def copy_stream(src, dst, msg_factory, mutate=None):
     return n
 
 
+def _one_core(job):
+    """Replicate one target core.  Runs in a worker process."""
+    i, src_idx, rep, off, srcdir, outdir, pb2_dir = job
+    if pb2_dir and pb2_dir not in sys.path:
+        sys.path.insert(0, pb2_dir)
+    import inst_dep_record_pb2 as dep_pb2
+    import packet_pb2
+
+    base = os.path.join(srcdir, f"cpu{src_idx}")
+    out = os.path.join(outdir, f"cpu{i}")
+
+    def shift_data(m):
+        if off and m.HasField("p_addr"):
+            m.p_addr += off
+        # pc deliberately untouched: replicas share code.
+
+    nd = copy_stream(base + ".data.trace.gz", out + ".data.trace.gz",
+                     dep_pb2.InstDepRecord, shift_data if off else None)
+    ni = copy_stream(base + ".inst.trace.gz", out + ".inst.trace.gz",
+                     packet_pb2.Packet, None)
+    ns = 0
+    sync_src = base + ".sync.trace.gz"
+    if os.path.exists(sync_src):
+        import sync_event_pb2
+        ns = copy_stream(sync_src, out + ".sync.trace.gz",
+                         sync_event_pb2.SyncEvent, None)
+    return (i, src_idx, rep, off, nd, ni, ns)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -88,6 +117,8 @@ def main():
                     help="bytes between replica address spaces. 0 = derive "
                          "from the observed footprint, rounded up to a power "
                          "of two.")
+    ap.add_argument("--jobs", type=int, default=0,
+                    help="worker processes (default: all cores)")
     ap.add_argument("--no-offset", action="store_true",
                     help="replicate without shifting addresses, reproducing "
                          "the paper's behaviour. Every replica then hits the "
@@ -130,33 +161,25 @@ def main():
             stride <<= 1
         print(f"[repl] data footprint top 0x{hi:x} -> stride 0x{stride:x}")
 
-    total = 0
+    # Each output core is an independent stream, so fan the work out across
+    # processes.  Rewriting 16 copies of a multi-million-record trace is
+    # otherwise half an hour of single-threaded protobuf work.
+    jobs = []
     for i in range(args.cores):
-        src_idx = i % n_src
-        rep = i // n_src
-        off = 0 if args.no_offset else rep * stride
-        base = os.path.join(args.srcdir, f"cpu{src_idx}")
-        out = os.path.join(args.outdir, f"cpu{i}")
+        jobs.append((i, i % n_src, i // n_src,
+                     0 if args.no_offset else (i // n_src) * stride,
+                     args.srcdir, args.outdir, args.pb2_dir))
 
-        def shift_data(m, _off=off):
-            if _off and m.HasField("p_addr"):
-                m.p_addr += _off
-            # pc deliberately untouched: replicas share code.
+    nproc = min(args.jobs or (os.cpu_count() or 1), len(jobs))
+    if nproc > 1:
+        import multiprocessing as mp
+        with mp.Pool(nproc) as pool:
+            results = pool.map(_one_core, jobs)
+    else:
+        results = [_one_core(j) for j in jobs]
 
-        def shift_pkt(m, _off=off):
-            pass   # I-side is code; never shifted.
-
-        nd = copy_stream(base + ".data.trace.gz", out + ".data.trace.gz",
-                         dep_pb2.InstDepRecord,
-                         shift_data if off else None)
-        ni = copy_stream(base + ".inst.trace.gz", out + ".inst.trace.gz",
-                         packet_pb2.Packet, None)
-        sync_src = base + ".sync.trace.gz"
-        ns = 0
-        if os.path.exists(sync_src):
-            import sync_event_pb2
-            ns = copy_stream(sync_src, out + ".sync.trace.gz",
-                             sync_event_pb2.SyncEvent, None)
+    total = 0
+    for i, src_idx, rep, off, nd, ni, ns in results:
         print(f"[repl] cpu{i} <- cpu{src_idx} replica {rep} offset 0x{off:x} "
               f"({nd} data, {ni} inst, {ns} sync)")
         total += nd
