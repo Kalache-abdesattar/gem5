@@ -297,9 +297,12 @@ Commit::clearStates(ThreadID tid)
     squashAfterInst[tid] = NULL;
 
     // Clear out any of this thread's instructions being sent to prior stages.
+    // Indexed by tid: 785eb1f37d used the time-buffer offset i, which is
+    // negative for past entries and wrote outside commitInfo[MaxThreads],
+    // crashing the first time an SE thread exits.
     for (int i = -cpu->timeBuffer.getPast();
          i <= cpu->timeBuffer.getFuture(); ++i)
-        cpu->timeBuffer[i].commitInfo[i] = {};
+        cpu->timeBuffer[i].commitInfo[tid] = {};
 }
 
 void Commit::drain() { drainPending = true; }
