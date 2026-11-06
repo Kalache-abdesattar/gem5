@@ -976,6 +976,9 @@ void copyCacheAndDirTBEs(TBE src, TBE dst) {
 void deallocateReqTBE(TBE tbe) {
   assert(is_valid(tbe));
   assert(tbe.is_req_tbe);
+  if (tbe.mshr_miss) {
+    mshrSampler.missDeallocated();
+  }
   storTBEs.removeEntryFromSlot(tbe.storSlot);
   TBEs.deallocate(tbe.addr);
 }
@@ -1215,6 +1218,19 @@ bool isWriteReqType(CHIRequestType type) {
       type == CHIRequestType:WriteUniqueFull ||
       type == CHIRequestType:WriteUniqueZero ||
       type == CHIRequestType:ReadUnique) {
+    return true;
+  }
+  return false;
+}
+
+// Copy-backs and evictions from upstream: not cache accesses, so never
+// secondary misses
+bool isCopyBackReqType(CHIRequestType type) {
+  if (type == CHIRequestType:WriteBackFull ||
+      type == CHIRequestType:WriteBackPtl ||
+      type == CHIRequestType:WriteEvictFull ||
+      type == CHIRequestType:WriteCleanFull ||
+      type == CHIRequestType:Evict) {
     return true;
   }
   return false;

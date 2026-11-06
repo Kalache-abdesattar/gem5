@@ -420,6 +420,18 @@ action(StallRequest, desc="") {
   // was stalled because of an existing request
   assert(is_valid(tbe));
   assert(tbe.addr == address);
+  // A request waiting on an outstanding miss for its line is a secondary
+  // miss; count each requestor once per primary miss (a stalled request is
+  // replayed only when this TBE is released)
+  if (tbe.mshr_miss) {
+    peek(reqRdyPort, CHIRequestMsg) {
+      if ((isCopyBackReqType(in_msg.type) == false) &&
+          (tbe.mshr_secondary_reqs.isElement(in_msg.requestor) == false)) {
+        tbe.mshr_secondary_reqs.add(in_msg.requestor);
+        mshrSampler.secondaryMiss(in_msg.is_local_pf || in_msg.is_remote_pf);
+      }
+    }
+  }
   // tracks pending
   tbe.wakeup_pending_req := true;
   stall_and_wait(reqRdyPort, address);
@@ -3893,6 +3905,11 @@ action(Callback_WriteUnique, desc="") {
 
 action(Profile_Miss, desc="") {
   assert(is_valid(tbe));
+  // this request's TBE now tracks an outstanding miss: an MSHR
+  if (tbe.is_req_tbe && (tbe.mshr_miss == false)) {
+    tbe.mshr_miss := true;
+    mshrSampler.missAllocated();
+  }
   bool is_demand := (tbe.is_local_pf || tbe.is_remote_pf) == false;
   bool is_remote_can_notify := tbe.is_remote_pf && upstream_prefetch_trains_prefetcher;
   if (is_demand) {

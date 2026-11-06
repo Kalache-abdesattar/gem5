@@ -117,6 +117,7 @@ MakeInclude('structures/PersistentTable.hh')
 MakeInclude('structures/RubyPrefetcher.hh')
 MakeInclude('structures/RubyPrefetcherProxy.hh')
 MakeInclude('structures/TBEStorage.hh')
+MakeInclude('structures/MSHRSampler.hh')
 if env['CONF']['RUBY_PROTOCOL_CHI']:
     MakeInclude('structures/MN_TBEStorage.hh')
     MakeInclude('structures/MN_TBETable.hh')

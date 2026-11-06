@@ -58,5 +58,6 @@ Source('TimerTable.cc')
 Source('BankedArray.cc')
 Source('ALUFreeListArray.cc')
 Source('TBEStorage.cc')
+Source('MSHRSampler.cc')
 if env['CONF']['RUBY_PROTOCOL_CHI']:
     Source('MN_TBETable.cc')
