@@ -142,7 +142,7 @@ namespace gem5
  * exit.
  */
 
-class TraceCPU : public ClockedObject
+class TraceCPU : public ClockedObject, public SyncParticipant
 {
 
   public:
@@ -200,7 +200,7 @@ class TraceCPU : public ClockedObject
      * single choke point for D-side progress. */
 
     /** Called by the arbiter when the barrier opens. */
-    void releaseFromSync();
+    void releaseFromSync() override;
 
     /** True while parked at a synchronisation point. */
     bool isSyncStalled() const { return syncStalled; }

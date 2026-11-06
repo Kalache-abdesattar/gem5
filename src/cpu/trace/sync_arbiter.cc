@@ -1,7 +1,6 @@
 #include "cpu/trace/sync_arbiter.hh"
 
 #include "base/trace.hh"
-#include "cpu/trace/trace_cpu.hh"
 #include "debug/TraceCPUData.hh"
 
 namespace gem5
@@ -19,13 +18,15 @@ SyncArbiter::SyncArbiter(const Params &params)
 }
 
 unsigned
-SyncArbiter::registerCpu(TraceCPU *cpu)
+SyncArbiter::registerCpu(SyncParticipant *cpu, bool barriers)
 {
     const unsigned id = participants.size();
     participants.push_back(cpu);
     arrived.push_back(false);
-    active.push_back(true);
-    ++numActive;
+    active.push_back(barriers);
+    retired.push_back(false);
+    if (barriers)
+        ++numActive;
     return id;
 }
 
@@ -50,8 +51,13 @@ void
 SyncArbiter::retire(unsigned id)
 {
     assert(id < participants.size());
-    if (!active[id])
+    if (retired[id])
         return;
+    retired[id] = true;
+    if (lockHolder == (int)id)
+        releaseLock(id);
+    if (!active[id])
+        return;                 // never counted at barriers
     active[id] = false;
     --numActive;
     // A retiring CPU must not hold the barrier: if it had already arrived,
@@ -60,8 +66,6 @@ SyncArbiter::retire(unsigned id)
         arrived[id] = false;
         --numArrived;
     }
-    if (lockHolder == (int)id)
-        releaseLock(id);
     DPRINTF(TraceCPUData, "SyncArbiter: cpu %u retired, %u active\n",
             id, numActive);
     const unsigned target = expected ? expected : numActive;
@@ -108,7 +112,7 @@ SyncArbiter::releaseLock(unsigned id)
     while (!lockQueue.empty()) {
         const unsigned next = lockQueue.front();
         lockQueue.pop_front();
-        if (!active[next])
+        if (retired[next])
             continue;
         lockHolder = (int)next;
         ++criticalGrants;
@@ -134,6 +138,55 @@ SyncArbiter::releaseAll()
         if (active[i])
             participants[i]->releaseFromSync();
     }
+}
+
+void
+SyncArbiter::registerThread(unsigned tid, SyncParticipant *cpu)
+{
+    threads[tid] = cpu;
+}
+
+void
+SyncArbiter::expectSpawn(unsigned child)
+{
+    gated.insert(child);
+}
+
+void
+SyncArbiter::spawn(unsigned child)
+{
+    if (!gated.erase(child))
+        return;
+    DPRINTF(TraceCPUData, "SyncArbiter: thread %u spawned\n", child);
+    auto it = threads.find(child);
+    if (it != threads.end())
+        it->second->releaseFromSync();
+}
+
+bool
+SyncArbiter::join(unsigned child, SyncParticipant *waiter)
+{
+    // A child with no trace in this replay cannot be waited for.
+    if (exited.count(child) || !threads.count(child))
+        return true;
+    joinWaiters[child].push_back(waiter);
+    DPRINTF(TraceCPUData, "SyncArbiter: waiting to join thread %u\n", child);
+    return false;
+}
+
+void
+SyncArbiter::threadExit(unsigned tid)
+{
+    exited.insert(tid);
+    auto it = joinWaiters.find(tid);
+    if (it == joinWaiters.end())
+        return;
+    DPRINTF(TraceCPUData, "SyncArbiter: thread %u exited, releasing joins\n",
+            tid);
+    const auto waiters = std::move(it->second);
+    joinWaiters.erase(it);
+    for (SyncParticipant *w : waiters)
+        w->releaseFromSync();
 }
 
 } // namespace gem5
