@@ -1,0 +1,15 @@
+Import('*')
+
+# Reads InstDepRecord streams (the elastic-trace data format), so it needs
+# protobuf exactly like TraceCPU.
+if not env['CONF']['HAVE_PROTOBUF']:
+    Return()
+
+SimObject(
+    'IntervalCPU.py',
+    sim_objects=['IntervalCPU'],
+    tags=['protobuf']
+)
+Source('interval_cpu.cc', tags=['protobuf'])
+
+DebugFlag('IntervalCPU')
