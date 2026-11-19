@@ -1,0 +1,11 @@
+# Unified L1I/L1D/L2 CHI RN-F for one-pass CPU models (IntervalCPU).
+Import('*')
+
+_chi_enabled = (env['CONF']['PROTOCOL'] == 'CHI' or
+                env['CONF'].get('RUBY_PROTOCOL_CHI', False))
+if not _chi_enabled:
+    Return()
+
+SimObject('UnifiedRNF.py', sim_objects=['UnifiedRNF'])
+Source('UnifiedRNF.cc')
+DebugFlag('UnifiedRNF')
