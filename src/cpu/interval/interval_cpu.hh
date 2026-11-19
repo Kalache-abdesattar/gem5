@@ -8,6 +8,8 @@
 #include <array>
 #include <cstdint>
 #include <deque>
+#include <functional>
+#include <queue>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -15,6 +17,7 @@
 
 #include "base/statistics.hh"
 #include "cpu/interval/branch_model.hh"
+#include "cpu/interval/fast_mem.hh"
 #include "cpu/trace/sync_arbiter.hh"
 #include "mem/packet.hh"
 #include "mem/port.hh"
@@ -68,7 +71,8 @@ class System;
  * nothing depended on them) are re-inserted as independent filler COMPs so
  * they still occupy dispatch, ROB and commit bandwidth.
  */
-class IntervalCPU : public ClockedObject, public SyncParticipant
+class IntervalCPU : public ClockedObject, public SyncParticipant,
+                    public FastMemClient
 {
   public:
     IntervalCPU(const IntervalCPUParams &params);
@@ -438,6 +442,8 @@ class IntervalCPU : public ClockedObject, public SyncParticipant
     // ---- synchronisation --------------------------------------------------
     SyncArbiter *arbiter;
     const unsigned threadId;
+    const Addr addrOffset;     ///< added to trace addresses
+    const Tick fastMemRespTicks;  ///< port delay mirrored for fast_mem
     std::vector<SyncPoint> syncPoints;
     size_t nextSync = 0;
     bool syncEnabled = false;
@@ -447,6 +453,29 @@ class IntervalCPU : public ClockedObject, public SyncParticipant
     bool parked = false;            ///< waiting for releaseFromSync()
     uint64_t dispatchedOps = 0;
     uint64_t committedOps = 0;
+
+    // ---- one-pass memory model (fast_mem) ---------------------------------
+    // Accesses go to fastMem by direct call; completions (immediate for
+    // hits, later for misses) wait here until the core reaches their tick
+    // and are handed to the same handlers as port responses.
+  public:
+    void fastMemDone(PacketPtr pkt, Tick when) override;
+  private:
+    void fastAccess(PacketPtr pkt);
+    void deliverFastMem();
+    struct MemDone
+    {
+        Tick when;
+        uint64_t seq;
+        PacketPtr pkt;
+        bool operator>(const MemDone &o) const
+        { return when != o.when ? when > o.when : seq > o.seq; }
+    };
+    FastMem *fastMem = nullptr;
+    std::priority_queue<MemDone, std::vector<MemDone>,
+                        std::greater<MemDone>> memDone;
+    uint64_t memDoneSeq = 0;
+    bool deliveringMem = false;   ///< handlers must not reschedule tick
 
     // ---- timing -----------------------------------------------------------
     EventFunctionWrapper tickEvent;

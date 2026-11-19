@@ -86,7 +86,8 @@ IntervalCPU::IntervalCPU(const IntervalCPUParams &p)
       trace(p.dataTraceFile, name()),
       rob(p.robSize),
       arbiter(p.arbiter),
-      threadId(p.threadId),
+      threadId(p.threadId), addrOffset(p.addrOffset),
+      fastMemRespTicks(p.fastMemRespTicks),
       // CPU_Tick_Pri, as O3: the core ticks after the cache and Ruby events
       // of the same tick. At default priority a request sent on an edge
       // caught the Ruby L1 controller that edge (a 1-cycle hit where O3
@@ -113,6 +114,11 @@ IntervalCPU::IntervalCPU(const IntervalCPUParams &p)
         fuBusyUntil[g].assign(fuCount[g], 0);
 
     iq.reserve(iqSize);
+    if (p.fast_mem) {
+        fastMem = dynamic_cast<FastMem *>(p.fast_mem);
+        fatal_if(!fastMem, "%s: fast_mem %s is not a FastMem", name(),
+                 p.fast_mem->name());
+    }
     ++numActive;
 }
 
@@ -123,6 +129,8 @@ IntervalCPU::init()
     const auto &p = static_cast<const IntervalCPUParams &>(params());
     if (arbiter)
         arbiter->registerThread(threadId, this);
+    if (fastMem)
+        fastMem->setFastMemClient(this);
     if (!p.syncTraceFile.empty())
         loadSyncTrace(p.syncTraceFile);
 }
@@ -449,7 +457,7 @@ IntervalCPU::fillLookahead()
             break;
         }
         if (u.type != UopType::Comp) {
-            u.paddr = r.paddr;
+            u.paddr = r.paddr + addrOffset;
             u.size = r.size;
             u.flags = r.flags;
         }
@@ -550,6 +558,10 @@ IntervalCPU::sendData(const RobEntry &e, bool is_read)
 void
 IntervalCPU::queueDcache(PacketPtr pkt)
 {
+    if (fastMem) {
+        fastAccess(pkt);
+        return;
+    }
     if (dcacheRetryPkt) {
         dcacheBacklog.push_back(pkt);
         return;
@@ -1337,7 +1349,7 @@ IntervalCPU::fetch()
         const Addr line = need ? need
                                : pending.front().pc & ~Addr(lineSize - 1);
         if (fetchBufLine != line || !fetchBufValid) {
-            auto req = std::make_shared<Request>(line, lineSize,
+            auto req = std::make_shared<Request>(line + addrOffset, lineSize,
                                                  Request::INST_FETCH,
                                                  instRequestorId);
             req->setContext(ContextID(0));
@@ -1351,7 +1363,9 @@ IntervalCPU::fetch()
             fetchReqTick = curTick();
             ++fetchesInFlight;
             ++stats.numFetches;
-            if (!icachePort.sendTimingReq(pkt))
+            if (fastMem)
+                fastAccess(pkt);
+            else if (!icachePort.sendTimingReq(pkt))
                 icacheRetryPkt = pkt;
         }
     }
@@ -1476,7 +1490,7 @@ IntervalCPU::finished() const
 void
 IntervalCPU::wakeAt(Tick when)
 {
-    if (done)
+    if (done || deliveringMem)
         return;
     // Never run twice in one cycle.
     when = std::max(when, lastTickTick + clockPeriod());
@@ -1496,6 +1510,7 @@ IntervalCPU::tick()
         account(lastIdle, lastDispStall, now - lastTickCycle - Cycles(1));
     lastTickCycle = now;
     lastTickTick = curTick();
+    deliverFastMem();
 
     // What rename will see this cycle: occupancy at the end of the last.
     occRob0 = robCount;
@@ -1579,6 +1594,8 @@ IntervalCPU::tick()
         next = std::min(next, squashUntil);
     if (!fetched.empty() && fetched.front().readyTick > curTick())
         next = std::min(next, fetched.front().readyTick);
+    if (!memDone.empty())
+        next = std::min(next, std::max(memDone.top().when, curTick()));
     if (!loadSendQ.empty() && !dcacheRetryPkt)
         next = std::min(next, std::max(loadSendQ.front().first,
                                        clockEdge(Cycles(1))));
@@ -1605,9 +1622,46 @@ IntervalCPU::tick()
 // ---------------------------------------------------------------------------
 
 void
+IntervalCPU::fastAccess(PacketPtr pkt)
+{
+    const Tick when = fastMem->fastMemAccess(pkt);
+    if (when != MaxTick)
+        memDone.push({when + fastMemRespTicks, memDoneSeq++, pkt});
+}
+
+void
+IntervalCPU::fastMemDone(PacketPtr pkt, Tick when)
+{
+    when += fastMemRespTicks;
+    memDone.push({when, memDoneSeq++, pkt});
+    // first edge at or after the completion
+    const Tick edge = when <= clockEdge() ? clockEdge()
+        : clockEdge(Cycles(divCeil(when - clockEdge(), clockPeriod())));
+    wakeAt(edge);
+}
+
+void
+IntervalCPU::deliverFastMem()
+{
+    // Same handlers as port responses, which round to this edge as a Ruby
+    // response arriving mid-cycle does.
+    deliveringMem = true;
+    while (!memDone.empty() && memDone.top().when <= curTick()) {
+        PacketPtr pkt = memDone.top().pkt;
+        memDone.pop();
+        if (pkt->req->isInstFetch())
+            recvIcacheResp(pkt);
+        else
+            recvDcacheResp(pkt);
+    }
+    deliveringMem = false;
+}
+
+void
 IntervalCPU::recvIcacheResp(PacketPtr pkt)
 {
-    if ((pkt->getAddr() & ~Addr(lineSize - 1)) == fetchBufLine) {
+    if (((pkt->getAddr() - addrOffset) & ~Addr(lineSize - 1)) ==
+        fetchBufLine) {
         fetchBufValid = true;
         stats.icacheStallCycles +=
             divCeil(curTick() - fetchReqTick, clockPeriod());

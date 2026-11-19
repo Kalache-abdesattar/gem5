@@ -35,6 +35,14 @@ class IntervalCPU(ClockedObject):
     system = Param.System(Parent.any, "system object")
     icache_port = RequestPort("Instruction fetch port")
     dcache_port = RequestPort("Data port")
+    fastMemRespTicks = Param.Unsigned(1,
+        "Ticks added to a fast_mem completion before the core sees it. A "
+        "port-connected Ruby sequencer's response leaves its queued port one "
+        "tick after the callback (PacketQueue never sends in the current "
+        "tick), so the core sees it at the next edge; 1 keeps the same.")
+    fast_mem = Param.SimObject(NULL,
+        "One-pass cache model called directly instead of the ports "
+        "(e.g. UnifiedRNF); the ports are then left unconnected")
 
     dataTraceFile = Param.String("Micro-op stream (InstDepRecord protobuf)")
 
@@ -49,6 +57,8 @@ class IntervalCPU(ClockedObject):
         NULL, "Arbiter shared by all CPUs; required with syncTraceFile"
     )
     threadId = Param.Unsigned(0, "Thread number of the trace replayed here")
+    addrOffset = Param.Addr(0, "Added to every data and fetch address of "
+        "the trace (keeps independent traces apart in a multiprogram mix)")
 
     dispatchWidth = Param.Unsigned(4, "Micro-ops dispatched per cycle")
     issueWidth = Param.Unsigned(6, "Micro-ops issued per cycle")
