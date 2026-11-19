@@ -66,12 +66,13 @@ const int PRIORITY_SWITCH_LIMIT = 128;
 static int network_message_to_size(Message* net_msg_ptr);
 
 Throttle::Throttle(int sID, RubySystem *rs, NodeID node, Cycles link_latency,
-                   int endpoint_bandwidth, Switch *em, std::string link_name)
-    : Consumer(em,  Switch::THROTTLE_EV_PRI),
-      m_switch_id(sID), m_switch(em), m_node(node),
+                   int endpoint_bandwidth, Switch *em, ClockedObject *clk,
+                   std::string link_name)
+    : Consumer(clk,  Switch::THROTTLE_EV_PRI),
+      m_switch_id(sID), m_switch(em), m_clk(clk), m_node(node),
       m_physical_vnets(false), m_ruby_system(rs),
       link_name(link_name),
-      throttleStats(em, node, link_name)
+      throttleStats(em, clk, node, link_name)
 {
     m_vnets = 0;
 
@@ -83,8 +84,9 @@ Throttle::Throttle(int sID, RubySystem *rs, NodeID node, Cycles link_latency,
 
 Throttle::Throttle(int sID, RubySystem *rs, NodeID node, Cycles link_latency,
                    int link_bandwidth_multiplier, int endpoint_bandwidth,
-                   Switch *em, std::string link_name)
-    : Throttle(sID, rs, node, link_latency, endpoint_bandwidth, em, link_name)
+                   Switch *em, ClockedObject *clk, std::string link_name)
+    : Throttle(sID, rs, node, link_latency, endpoint_bandwidth, em, clk,
+               link_name)
 {
     gem5_assert(link_bandwidth_multiplier > 0);
     m_link_bandwidth_multiplier.push_back(link_bandwidth_multiplier);
@@ -93,8 +95,10 @@ Throttle::Throttle(int sID, RubySystem *rs, NodeID node, Cycles link_latency,
 Throttle::Throttle(int sID, RubySystem *rs, NodeID node, Cycles link_latency,
                    const std::vector<int> &vnet_channels,
                    const std::vector<int> &vnet_bandwidth_multiplier,
-                   int endpoint_bandwidth, Switch *em, std::string link_name)
-    : Throttle(sID, rs, node, link_latency, endpoint_bandwidth, em, link_name)
+                   int endpoint_bandwidth, Switch *em, ClockedObject *clk,
+                   std::string link_name)
+    : Throttle(sID, rs, node, link_latency, endpoint_bandwidth, em, clk,
+               link_name)
 {
     m_physical_vnets = true;
     for (auto link_bandwidth_multiplier : vnet_bandwidth_multiplier){
@@ -174,7 +178,7 @@ Throttle::operateVnet(int vnet, int channel, int &total_bw_remaining,
     int &units_remaining = m_units_remaining[vnet][channel];
 
     gem5_assert(units_remaining >= 0);
-    Tick current_time = m_switch->clockEdge();
+    Tick current_time = m_clk->clockEdge();
 
     int bw_remaining = m_physical_vnets ?
                 getLinkBandwidth(vnet) : total_bw_remaining;
@@ -200,7 +204,7 @@ Throttle::operateVnet(int vnet, int channel, int &total_bw_remaining,
             // Move the message
             in->dequeue(current_time);
             out->enqueue(msg_ptr, current_time,
-                         m_switch->cyclesToTicks(m_link_latency),
+                         m_clk->cyclesToTicks(m_link_latency),
                          m_ruby_system->getRandomization(),
                          m_ruby_system->getWarmupEnabled());
 
@@ -333,7 +337,8 @@ network_message_to_size(Message *net_msg_ptr)
 
 Throttle::
 ThrottleStats::ThrottleStats(
-    Switch *parent, const NodeID &nodeID, std::string link_name
+    Switch *parent, ClockedObject *clk, const NodeID &nodeID,
+    std::string link_name
 ) : statistics::Group(parent, csprintf("throttle%02i", nodeID).c_str()),
       ADD_STAT(acc_link_utilization, statistics::units::Count::get(),
           csprintf("Accumulated link utilization %s",link_name).c_str()),
@@ -359,7 +364,7 @@ ThrottleStats::ThrottleStats(
         "Average useful (only data) bandwidth (GB/s)")
 {
     link_utilization = 100 * acc_link_utilization /
-                        (simTicks / parent->clockPeriod());
+                        (simTicks / clk->clockPeriod());
 
     avg_msg_wait_time = total_msg_wait_time / total_msg_count;
 

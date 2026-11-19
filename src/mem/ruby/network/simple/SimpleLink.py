@@ -64,6 +64,13 @@ class SimpleIntLink(BasicIntLink):
     # set these manually.
     buffers = VectorParam.MessageBuffer([], "Buffers for int_links")
 
+    # A link is normally timed (bandwidth per cycle, latency in cycles) by
+    # the clock of the router that drives it, i.e. its source. Set this to
+    # time it by the destination router's clock instead, e.g. for an uplink
+    # from a core-clocked router into a slower NoC.
+    use_dst_clock = Param.Bool(False, "Time this link with the destination "
+                               "router's clock instead of the source's")
+
     def setup_buffers(self, network):
         if len(self.buffers) > 0:
             fatal(

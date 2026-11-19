@@ -91,8 +91,12 @@ Switch::addOutPort(std::string link_name,
                    Cycles link_latency, int link_weight,
                    int bw_multiplier,
                    bool is_external,
-                   PortDirection dst_inport)
+                   PortDirection dst_inport,
+                   ClockedObject *link_clk)
 {
+    // the throttle runs on the link's clock (default: this router's)
+    ClockedObject *clk = link_clk ? link_clk : this;
+
     const std::vector<int> &physical_vnets_channels =
         m_network_ptr->params().physical_vnets_channels;
 
@@ -107,11 +111,11 @@ Switch::addOutPort(std::string link_name,
         throttles.emplace_back(m_id, m_network_ptr->params().ruby_system,
             throttles.size(), link_latency,
             physical_vnets_channels, physical_vnets_bandwidth,
-            m_network_ptr->getEndpointBandwidth(), this, link_name);
+            m_network_ptr->getEndpointBandwidth(), this, clk, link_name);
     } else {
         throttles.emplace_back(m_id, m_network_ptr->params().ruby_system,
             throttles.size(), link_latency, bw_multiplier,
-            m_network_ptr->getEndpointBandwidth(), this, link_name);
+            m_network_ptr->getEndpointBandwidth(), this, clk, link_name);
     }
 
     // Create one buffer per vnet (these are intermediaryQueues)

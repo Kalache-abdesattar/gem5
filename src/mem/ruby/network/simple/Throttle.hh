@@ -71,15 +71,17 @@ class Throttle : public Consumer
 {
   private:
     Throttle(int sID, RubySystem *rs, NodeID node, Cycles link_latency,
-             int endpoint_bandwidth, Switch *em, std::string link_name);
+             int endpoint_bandwidth, Switch *em, ClockedObject *clk,
+             std::string link_name);
   public:
     Throttle(int sID, RubySystem *rs, NodeID node, Cycles link_latency,
              int link_bandwidth_multiplier, int endpoint_bandwidth,
-             Switch *em, std::string link_name);
+             Switch *em, ClockedObject *clk, std::string link_name);
     Throttle(int sID, RubySystem *rs, NodeID node, Cycles link_latency,
              const std::vector<int> &vnet_channels,
              const std::vector<int> &vnet_bandwidth_multiplier,
-             int endpoint_bandwidth, Switch *em, std::string link_name);
+             int endpoint_bandwidth, Switch *em, ClockedObject *clk,
+             std::string link_name);
     ~Throttle() {}
 
     std::string name()
@@ -123,6 +125,7 @@ class Throttle : public Consumer
 
     const int m_switch_id;
     Switch *m_switch;
+    ClockedObject *m_clk;   // clock the link is timed with
     NodeID m_node;
 
     bool m_physical_vnets;
@@ -137,8 +140,8 @@ class Throttle : public Consumer
 
     struct ThrottleStats : public statistics::Group
     {
-        ThrottleStats(Switch *parent, const NodeID &nodeID,
-                      std::string link_name);
+        ThrottleStats(Switch *parent, ClockedObject *clk,
+                      const NodeID &nodeID, std::string link_name);
 
         // Statistical variables
         statistics::Scalar acc_link_utilization;

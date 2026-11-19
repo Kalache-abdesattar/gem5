@@ -65,7 +65,8 @@ SimpleExtLink::print(std::ostream& out) const
 SimpleIntLink::SimpleIntLink(const Params &p)
     : BasicIntLink(p),
       m_bw_multiplier(p.bandwidth_factor),
-      m_buffers(p.buffers)
+      m_buffers(p.buffers),
+      m_use_dst_clock(p.use_dst_clock)
 {
 
 }

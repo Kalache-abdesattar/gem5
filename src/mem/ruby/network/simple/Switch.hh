@@ -95,7 +95,8 @@ class Switch : public BasicRouter
                     const NetDest& routing_table_entry,
                     Cycles link_latency, int link_weight, int bw_multiplier,
                     bool is_external,
-                    PortDirection dst_inport = "");
+                    PortDirection dst_inport = "",
+                    ClockedObject *link_clk = nullptr);
 
     void resetStats();
     void collateStats();

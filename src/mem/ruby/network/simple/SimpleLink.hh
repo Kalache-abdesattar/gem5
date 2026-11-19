@@ -86,6 +86,7 @@ class SimpleIntLink : public BasicIntLink
 
     int m_bw_multiplier;
     const std::vector<MessageBuffer*> m_buffers;
+    const bool m_use_dst_clock;
 };
 
 inline std::ostream&
