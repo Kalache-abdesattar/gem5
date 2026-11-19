@@ -30,7 +30,15 @@ from trace_board import TraceBoard          # noqa: E402  (same directory)
 
 def parse_args():
     p = argparse.ArgumentParser(description="trace_sim: CHI replay")
-    p.add_argument("--trace-dir", required=True)
+    p.add_argument("--trace-dir")
+    p.add_argument("--mix", metavar="DIR,DIR,...",
+                   help="multiprogram mix instead of --trace-dir: core i "
+                        "replays the single-thread trace (cpu0.*) in the i-th "
+                        "directory, independently (no sync), its addresses "
+                        "moved up by i * --mix-stride so the programs share "
+                        "no lines. Sets --num-cores. interval only.")
+    p.add_argument("--mix-stride", default="256MiB",
+                   help="address distance between the programs of a --mix")
     p.add_argument("--num-cores", type=int, default=2)
     p.add_argument("--stats-period", type=int, default=0, metavar="TICKS",
                    help="dump stats every TICKS (0 = only at the end)")
@@ -63,6 +71,24 @@ def parse_args():
                         "asserts under sharing even for gem5's own MemTest. "
                         "repo-l3 = config/chi/l3_cache_hierarchy.py, the "
                         "three-level hierarchy this repo's PARSEC runs use")
+    p.add_argument("--l1l2-link-clock", choices=("noc", "core"),
+                   default="noc",
+                   help="repo-l3 only: clock of the L1/L2 routers, i.e. of "
+                        "the L1<->L2 links and the L2's input link. noc = "
+                        "the NoC/L3 clock (half the core's), core = the core "
+                        "clock. L2 -> L3 links stay at the NoC clock.")
+    p.add_argument("--l1l2-model", choices=("ruby", "unified"),
+                   default="ruby",
+                   help="repo-l3 only. ruby = Ruby CHI L1I/L1D/L2 "
+                        "controllers. unified = one UnifiedRNF per core "
+                        "(one-pass L1/L2, CHI towards the L3); needs "
+                        "--cpu-model interval")
+    p.add_argument("--rnf-timing", default="",
+                   help="unified only: comma-separated UnifiedRNF latency "
+                        "overrides, e.g. l2_hit_latency=14,resp_latency=8")
+    p.add_argument("--rnf-sample-period", type=int, default=0,
+                   metavar="CYCLES",
+                   help="unified only: occupancy CSV period (0 = off)")
     p.add_argument("--no-dmt", action="store_true", default=True,
                    help="disable Direct Memory Transfer on the home node "
                         "(required for TraceCPU; see README)")
@@ -228,11 +254,27 @@ def main():
 
     interval = args.cpu_model == "interval"
 
+    if args.mix:
+        if not interval:
+            fatal("--mix needs --cpu-model interval")
+        if args.trace_dir or args.sync:
+            fatal("--mix replaces --trace-dir and runs without --sync")
+        mix = args.mix.split(",")
+        args.num_cores = len(mix)
+        from m5.util.convert import toMemorySize
+        stride = toMemorySize(args.mix_stride)
+        offsets = [i * stride for i in range(len(mix))]
+    elif not args.trace_dir:
+        fatal("give --trace-dir or --mix")
+    else:
+        offsets = [0] * args.num_cores
+
     traces = []
     for i in range(args.num_cores):
-        inst_f = os.path.join(args.trace_dir, f"cpu{i}.inst.trace.gz")
-        data_f = os.path.join(args.trace_dir, f"cpu{i}.data.trace.gz")
-        sync_f = os.path.join(args.trace_dir, f"cpu{i}.sync.trace.gz")
+        d, c = (mix[i], 0) if args.mix else (args.trace_dir, i)
+        inst_f = os.path.join(d, f"cpu{c}.inst.trace.gz")
+        data_f = os.path.join(d, f"cpu{c}.data.trace.gz")
+        sync_f = os.path.join(d, f"cpu{c}.sync.trace.gz")
         for f in ((data_f,) if interval else (inst_f, data_f)):
             if not os.path.isfile(f):
                 fatal("missing trace: %s", f)
@@ -248,6 +290,7 @@ def main():
                 dataTraceFile=traces[i][1],
                 syncTraceFile=traces[i][2],
                 threadId=i,
+                addrOffset=offsets[i],
 
                 dispatchWidth=args.dispatch_width,
                 issueWidth=args.issue_width,
@@ -303,14 +346,35 @@ def main():
         l2_config["size"] = args.l2_size
         l3_config["size"] = args.l3_size
         l3_config["mshr_sample_period"] = args.l3_mshr_sample_period
-        from config.chi.l3_cache_hierarchy import L3CacheHierarchy
-        hierarchy = L3CacheHierarchy(
-            l1_config=l1_config,
-            l2_config=l2_config,
-            l3_config=l3_config,
-            cores_per_cluster=args.cores_per_cluster,
-            num_l3_slices=args.num_l3_slices,
-        )
+        if args.l1l2_model == "unified":
+            if not interval:
+                fatal("--l1l2-model unified needs --cpu-model interval")
+            if args.cores_per_cluster != 1:
+                fatal("--l1l2-model unified models private L2s only")
+            from config.chi.unified_rnf_hierarchy import UnifiedRNFHierarchy
+            timing = {}
+            for kv in filter(None, args.rnf_timing.split(",")):
+                k, v = kv.split("=")
+                timing[k.strip()] = int(v)
+            hierarchy = UnifiedRNFHierarchy(
+                l1_config=l1_config,
+                l2_config=l2_config,
+                l3_config=l3_config,
+                num_l3_slices=args.num_l3_slices,
+                rnf_timing=timing,
+                sample_period=args.rnf_sample_period,
+                l1l2_link_clock=args.l1l2_link_clock,
+            )
+        else:
+            from config.chi.l3_cache_hierarchy import L3CacheHierarchy
+            hierarchy = L3CacheHierarchy(
+                l1_config=l1_config,
+                l2_config=l2_config,
+                l3_config=l3_config,
+                cores_per_cluster=args.cores_per_cluster,
+                num_l3_slices=args.num_l3_slices,
+                l1l2_link_clock=args.l1l2_link_clock,
+            )
 
     board.cache_hierarchy = hierarchy
     hierarchy.incorporate_cache(board)
@@ -336,6 +400,7 @@ def main():
     print(f"[trace_sim] CHI replay: {args.num_cores} "
           f"{'IntervalCPU' if interval else 'TraceCPU'}(s) "
           f"hierarchy={args.hierarchy} L1={args.l1_size} "
+          f"l1l2={args.l1l2_model if args.hierarchy == 'repo-l3' else '-'} "
           f"sync={'on' if args.sync else 'OFF'}")
     exit_event = m5.simulate()
     print(f"[trace_sim] done @ tick {m5.curTick()}: {exit_event.getCause()}")

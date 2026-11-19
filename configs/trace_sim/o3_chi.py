@@ -82,6 +82,10 @@ def parse_args():
     p.add_argument("--cores-per-cluster", type=int, default=4,
                    help="cores sharing an L2 (repo-l3 only)")
     p.add_argument("--num-l3-slices", type=int, default=1)
+    p.add_argument("--l1l2-link-clock", choices=("noc", "core"),
+                   default="noc",
+                   help="repo-l3 only: clock of the L1/L2 routers (as in "
+                        "replay_chi.py). L2 -> L3 links stay at the NoC clock.")
     p.add_argument("--l3-mshr-sample-period", type=int, default=0,
                    metavar="CYCLES",
                    help="repo-l3 only: sample each L3 slice's MSHR "
@@ -180,6 +184,7 @@ def main():
             l3_config=l3_config,
             cores_per_cluster=args.cores_per_cluster,
             num_l3_slices=args.num_l3_slices,
+            l1l2_link_clock=args.l1l2_link_clock,
         )
 
     board.cache_hierarchy = hierarchy
