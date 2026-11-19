@@ -23,11 +23,37 @@ SyncArbiter::registerCpu(SyncParticipant *cpu, bool barriers)
     const unsigned id = participants.size();
     participants.push_back(cpu);
     arrived.push_back(false);
-    active.push_back(barriers);
+    barrierCpu.push_back(barriers);
+    active.push_back(false);        // from startup() or its spawn
     retired.push_back(false);
-    if (barriers)
-        ++numActive;
     return id;
+}
+
+void
+SyncArbiter::startup()
+{
+    SimObject::startup();
+    // every expectSpawn() has happened by now (CPUs load their traces at
+    // init), so the threads still gated are exactly the ones not yet alive
+    for (unsigned id = 0; id < participants.size(); ++id) {
+        bool gated_thread = false;
+        for (const auto &[tid, cpu] : threads)
+            if (cpu == participants[id] && gated.count(tid))
+                gated_thread = true;
+        if (!gated_thread)
+            activate(id);
+    }
+}
+
+void
+SyncArbiter::activate(unsigned id)
+{
+    if (!barrierCpu[id] || active[id] || retired[id])
+        return;
+    active[id] = true;
+    ++numActive;
+    DPRINTF(TraceCPUData, "SyncArbiter: cpu %u counts at barriers, %u "
+            "active\n", id, numActive);
 }
 
 void
@@ -159,8 +185,12 @@ SyncArbiter::spawn(unsigned child)
         return;
     DPRINTF(TraceCPUData, "SyncArbiter: thread %u spawned\n", child);
     auto it = threads.find(child);
-    if (it != threads.end())
-        it->second->releaseFromSync();
+    if (it == threads.end())
+        return;
+    for (unsigned id = 0; id < participants.size(); ++id)
+        if (participants[id] == it->second)
+            activate(id);
+    it->second->releaseFromSync();
 }
 
 bool

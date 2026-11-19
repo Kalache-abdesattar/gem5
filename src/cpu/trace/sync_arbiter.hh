@@ -39,12 +39,19 @@ class SyncArbiter : public SimObject
     PARAMS(SyncArbiter);
     SyncArbiter(const Params &params);
 
+    /** Decides who counts at barriers from the start: every registered
+     *  barrier CPU except threads still waiting for their spawn. */
+    void startup() override;
+
     /**
      * Called once per CPU at init. Returns the participant id. A CPU whose
      * trace has no barrier or parallel-region events passes barriers=false:
      * it may still take the critical-section lock, but barriers do not wait
      * for it. Otherwise a thread with only lock events (a main thread parked
      * at join while its workers meet at barriers) would hold every barrier.
+     * A spawned thread counts at barriers only from its spawn: a second
+     * group of workers, created after the first is joined, must not hold
+     * the first group's barriers.
      */
     unsigned registerCpu(SyncParticipant *cpu, bool barriers = true);
 
@@ -92,10 +99,14 @@ class SyncArbiter : public SimObject
 
   private:
     void releaseAll();
+    /** Start counting participant @id at barriers. */
+    void activate(unsigned id);
 
     std::vector<SyncParticipant *> participants;
     std::vector<bool> arrived;
-    std::vector<bool> active;      ///< counts at barriers and not retired
+    std::vector<bool> barrierCpu;  ///< registered with barriers=true
+    std::vector<bool> active;      ///< counts at barriers now: started
+                                   ///< (or spawned) and not retired
     std::vector<bool> retired;
     unsigned expected;     /**< from params; 0 = all registered */
     unsigned numArrived;
